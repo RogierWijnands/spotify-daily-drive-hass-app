@@ -1,0 +1,22 @@
+# Local configuration may contain Spotify account and playlist details.
+*.json
+!local-config.example.json
+
+# Local databases contain Spotify tokens and playback history.
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+
+# Common credential files.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+__pycache__/
+.venv/
