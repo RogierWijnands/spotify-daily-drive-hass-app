@@ -124,12 +124,24 @@ def music_candidates(api, playlist_ids, rng, issues=None):
                                 lambda: api.get("/me/top/artists", time_range=random_time_range, limit=50), issues)
     followed_artists = get_api_items("followed artists", api.followed_artists, issues)
 
-    # Include every credited artist, even from liked tracks outside the final track sample.
+    # Load configured playlists before building the artist pool so their artists
+    # can also contribute discoveries.
+    configured = []
+    for pid in playlist_ids:
+        entries = get_api_items(
+            f"playlist {pid}",
+            lambda: api.pages(f"/playlists/{pid}/items", {"additional_types": "track", "market": "NL"}),
+            issues,
+        )
+        configured.extend(entry.get("item") for entry in entries
+                          if isinstance(entry, dict) and not entry.get("is_local"))
+
+    # Include credited artists from every retrieved track source.
     artists_from_retrieved_tracks = [
         artist
         for item in (
             short_term_top_tracks + medium_term_top_tracks + long_term_top_tracks
-            + recently_played_tracks + liked_tracks
+            + recently_played_tracks + liked_tracks + configured
         )
         if isinstance(item, dict) and isinstance(item.get("artists"), list)
         for artist in item["artists"]
@@ -228,19 +240,9 @@ def music_candidates(api, playlist_ids, rng, issues=None):
                    for credit in (item.get("artists") or []))
         )
 
-    # Add tracks from each configured source playlist; local files cannot be used.
-    configured = []
-    for pid in playlist_ids:
-        entries = get_api_items(
-            f"playlist {pid}",
-            lambda: api.pages(f"/playlists/{pid}/items", {"additional_types": "track", "market": "NL"}),
-            issues,
-        )
-        configured.extend(entry.get("item") for entry in entries
-                          if isinstance(entry, dict) and not entry.get("is_local"))
-
-    # Top and recently played endpoints do not support market. Resolve candidates with
-    # uncertain playability against the account's market before selection.
+    # Top and recently played endpoints do not accept a market, so they may omit
+    # whether a track is playable in NL. Look up those tracks with market=NL before
+    # deciding whether to include them.
     cache = {}
     failed_tracks = set()
 

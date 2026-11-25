@@ -614,6 +614,35 @@ class SelectionTests(unittest.TestCase):
         ])
         self.assertEqual([item["id"] for item in groups[2]], ["discovery"])
 
+    def test_artists_from_configured_playlists_join_the_deduplicated_pool(self):
+        class Fake(UncachedSpotify):
+            def __init__(self):
+                self.selected = []
+
+            def get(self, path, **params):
+                if path.startswith("/artists/"):
+                    self.selected.append(path.split("/")[2])
+                    return {"items": [], "total": 0}
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                if path == "/playlists/source/items":
+                    return [{"item": {
+                        "id": "configured-track", "type": "track", "uri": "spotify:track:configured-track",
+                        "duration_ms": 180000, "is_playable": True,
+                        "artists": [{"id": "configured-artist"}],
+                    }}]
+                return []
+
+            def followed_artists(self):
+                return []
+
+        api = Fake()
+        groups = music_candidates(api, ["source"], random.Random(1))
+
+        self.assertEqual(api.selected, ["configured-artist"])
+        self.assertEqual([item["id"] for item in groups[3]], ["configured-track"])
+
     def test_music_selection_reuses_liked_tracks_and_followed_artists(self):
         with tempfile.TemporaryDirectory() as directory:
             class Fake(Spotify):
