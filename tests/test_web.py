@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import call, patch
@@ -81,6 +82,35 @@ class WebTests(unittest.TestCase):
             web.refresh.lock.release()
 
         self.assertEqual(response.status_code, 409)
+
+    def test_reconnecting_clears_cache_and_waits_for_refresh(self):
+        web.store.set_many({"client_id": "a" * 32})
+        web.store.set_cached("saved_tracks", "2026-01-01", [{"track": "old"}])
+        web.store.set_cached("followed_artists", "2026-01-01", [{"id": "old"}])
+        web.oauth.update(state="state", client_id="a" * 32, verifier="verifier", created=time.monotonic())
+        data = {"csrf": web.csrf, "callback": "http://127.0.0.1:8888/callback?code=abc&state=state"}
+        web.refresh.lock.acquire()
+        try:
+            response = self.client.post("/callback", data=data, environ_overrides=self.remote)
+        finally:
+            web.refresh.lock.release()
+        self.assertEqual(response.status_code, 409)
+        self.assertIsNotNone(web.store.get_cached("saved_tracks", "2026-01-01"))
+        with patch("app.web.token_request", return_value={"refresh_token": "new"}):
+            response = self.client.post("/callback", data=data, environ_overrides=self.remote)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(web.store.get_cached("saved_tracks", "2026-01-01"))
+        self.assertIsNone(web.store.get_cached("followed_artists", "2026-01-01"))
+
+    def test_changing_client_id_clears_cache(self):
+        web.store.set_many({"client_id": "a" * 32})
+        web.store.set_cached("saved_tracks", "2026-01-01", [])
+        web.store.set_cached("followed_artists", "2026-01-01", [])
+        data = {"csrf": web.csrf, "client_id": "b" * 32, "target": "0" * 22, "sources": ""}
+        response = self.client.post("/configure", data=data, environ_overrides=self.remote)
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(web.store.get_cached("saved_tracks", "2026-01-01"))
+        self.assertIsNone(web.store.get_cached("followed_artists", "2026-01-01"))
 
     def test_scheduler_runs_six_times_in_amsterdam_time(self):
         amsterdam = ZoneInfo("Europe/Amsterdam")

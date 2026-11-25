@@ -24,6 +24,9 @@ class Store:
                     playlist_id TEXT NOT NULL, before_items TEXT NOT NULL, after_items TEXT NOT NULL,
                     episodes TEXT NOT NULL, detail TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS daily_cache (
+                    key TEXT PRIMARY KEY, day TEXT NOT NULL, value TEXT NOT NULL
+                );
             """)
             # Only a persisted pending write can have reached Spotify before a restart.
             db.execute("""
@@ -51,11 +54,26 @@ class Store:
             row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value"]) if row else default
 
-    def set_many(self, values):
+    def set_many(self, values, *, clear_cache=False):
         with self.connect() as db:
+            if clear_cache:
+                db.execute("DELETE FROM daily_cache")
             db.executemany(
                 "INSERT OR REPLACE INTO settings VALUES (?, ?)",
                 [(k, json.dumps(v)) for k, v in values.items()],
+            )
+
+    def get_cached(self, key, day):
+        with self.connect() as db:
+            db.execute("DELETE FROM daily_cache WHERE day != ?", (day,))
+            row = db.execute("SELECT value FROM daily_cache WHERE key=?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else None
+
+    def set_cached(self, key, day, value):
+        with self.connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO daily_cache (key, day, value) VALUES (?, ?, ?)",
+                (key, day, json.dumps(value)),
             )
 
     def history(self):

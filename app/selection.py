@@ -59,7 +59,10 @@ def music_candidates(api, playlist_ids, rng):
     medium = api.get("/me/top/tracks", time_range="medium_term", limit=50)["items"]
     long = api.get("/me/top/tracks", time_range="long_term", limit=50)["items"]
     recent = [item["track"] for item in api.get("/me/player/recently-played", limit=50)["items"]]
-    saved = [entry.get("track") for entry in api.pages("/me/tracks", {"market": "NL"}, max_items=None)]
+    saved_entries = api.daily_cached(
+        "saved_tracks", lambda: api.pages("/me/tracks", {"market": "NL"}, max_items=None)
+    )
+    saved = [entry.get("track") for entry in saved_entries]
 
     current_ids = {t.get("id") for t in short + recent}
     old = [t for t in long if t.get("id") not in current_ids]
@@ -67,7 +70,8 @@ def music_candidates(api, playlist_ids, rng):
 
     time_range = rng.choice(("short_term", "medium_term", "long_term"))
     top_artists = api.get("/me/top/artists", time_range=time_range, limit=50)["items"]
-    artists = list({artist["id"]: artist for artist in top_artists + api.followed_artists()}.values())
+    followed = api.daily_cached("followed_artists", api.followed_artists)
+    artists = list({artist["id"]: artist for artist in top_artists + followed}.values())
     rng.shuffle(artists)
     discoveries = []
     cutoff = (date.today() - timedelta(days=180)).isoformat()

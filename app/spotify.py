@@ -1,7 +1,9 @@
 import base64
 import hashlib
 import secrets
+from datetime import datetime
 from urllib.parse import parse_qs, urlencode, urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -128,6 +130,15 @@ class Spotify:
     def get(self, path, **params):
         return self.request("GET", path, params=params)
 
+    def daily_cached(self, key, fetch):
+        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        cached = self.store.get_cached(key, day)
+        if cached is not None:
+            return cached
+        result = fetch()
+        self.store.set_cached(key, day, result)
+        return result
+
     def pages(self, path, params=None, max_items=1000):
         params = dict(params or {})
         params["limit"] = 50
@@ -138,8 +149,10 @@ class Spotify:
             page = self.get(path, **params, offset=offset)
             items = page["items"]
             result.extend(items)
-            if not page.get("next") or not items:
+            if not page.get("next"):
                 return result
+            if not items:
+                raise SpotifyError(f"Empty page with a next page in {path}")
             offset += len(items)
             if max_items is not None and offset >= max_items:
                 raise SpotifyError(f"Too many items in {path}; change aborted")
@@ -154,6 +167,8 @@ class Spotify:
             result.extend(page["items"])
             if not page["next"]:
                 return result
+            if not page["items"]:
+                raise SpotifyError("Empty followed-artist page with a next page")
             cursor = page["cursors"]["after"]
             if not cursor or cursor in seen_cursors:
                 raise SpotifyError("Spotify returned an invalid followed-artist pagination cursor")

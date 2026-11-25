@@ -42,6 +42,7 @@ https://open.spotify.com/show/3Ab6DGFJL7VE5ToIH4r6w1, 1
 - **Music:** top, recent and liked tracks; releases by favorite artists and their collaborators; optional source playlists. Discoveries are not Spotify recommendations and individual sources are not guaranteed in every refresh.
 - **History:** Spotify's longest top-artist and top-track ranges cover approximately one year, not all time.
 - **Artists:** up to 50 top artists from a randomly chosen short-, medium- or long-term range are combined with followed artists, deduplicated and shuffled. Up to eight are selected for release discovery per refresh.
+- **Cache:** liked tracks and followed artists are fetched once per `Europe/Amsterdam` calendar day and stored in SQLite. Expired entries are removed when next accessed; the data is fetched again on the first refresh of a new day, after reconnecting Spotify, or after changing the client ID. A failed fetch fails the refresh; stale data is not used.
 - **Collaborators:** up to four are selected randomly; up to two albums or singles each are searched, favoring recent releases.
 - **Source playlists:** new Spotify apps can read only playlists you own or collaborate on. Copy Discover Weekly or Release Radar into your own playlists to use them; the copies do not update automatically.
 - **Duration:** target 90 minutes ±2 minutes and 70/30 music/podcasts. Episodes take priority, so duration and ratio can differ.

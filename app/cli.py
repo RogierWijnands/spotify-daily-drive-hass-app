@@ -51,7 +51,7 @@ def connect_spotify(store, client_id):
     })
     if not token.get("refresh_token"):
         raise SpotifyError("Spotify did not return a refresh token")
-    store.set_many({"refresh_token": token["refresh_token"]})
+    store.set_many({"refresh_token": token["refresh_token"]}, clear_cache=True)
     print("Spotify is connected.")
 
 
@@ -101,9 +101,10 @@ def main(argv=None):
             "client_id": client_id, "playlist_id": target, "source_ids": sources,
             "news_shows": news, "podcast_shows": podcasts,
         }
-        if client_id != store.get("client_id"):
+        client_changed = client_id != store.get("client_id")
+        if client_changed:
             values["refresh_token"] = None
-        store.set_many(values)
+        store.set_many(values, clear_cache=client_changed)
 
         if args.authorize:
             connect_spotify(store, client_id)

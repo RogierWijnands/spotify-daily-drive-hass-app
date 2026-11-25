@@ -29,6 +29,9 @@ class CliTests(unittest.TestCase):
     def test_authorize_stores_refresh_token_without_printing_it(self):
         token = "private-refresh-token"
         callback = "http://127.0.0.1:8888/callback?code=abc&state=state"
+        store = Store(self.db)
+        store.set_many({"client_id": self.client_id})
+        store.set_cached("saved_tracks", "2026-01-01", [{"track": "old"}])
 
         with patch("app.cli.authorization", return_value=("https://spotify.example", "verifier", "state")), \
              patch("app.cli.getpass", return_value=callback), \
@@ -39,6 +42,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertNotIn(token, output.getvalue())
         self.assertEqual(Store(self.db).get("refresh_token"), token)
+        self.assertIsNone(Store(self.db).get_cached("saved_tracks", "2026-01-01"))
+
+    def test_changing_client_id_clears_cached_library(self):
+        store = Store(self.db)
+        store.set_many({"client_id": "b" * 32})
+        store.set_cached("followed_artists", "2026-01-01", [{"id": "old"}])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["--config", str(self.path), "--pending"]), 0)
+        self.assertIsNone(Store(self.db).get_cached("followed_artists", "2026-01-01"))
 
     def test_preview_displays_items_without_writing_playlist(self):
         item = {"uri": "spotify:track:1", "name": "Song", "duration_ms": 180000,

@@ -146,11 +146,12 @@ def configure():
                 "client_id": client_id, "playlist_id": target, "source_ids": sources,
                 "news_shows": news, "podcast_shows": podcasts,
             }
-            if client_id != store.get("client_id"):
+            client_changed = client_id != store.get("client_id")
+            if client_changed:
                 values["refresh_token"] = None
                 with oauth_lock:
                     oauth.clear()
-            store.set_many(values)
+            store.set_many(values, clear_cache=client_changed)
         finally:
             refresh.lock.release()
 
@@ -174,6 +175,9 @@ def authorize():
 
 @app.post("/callback")
 def callback():
+    if not refresh.lock.acquire(blocking=False):
+        return home("Wait for the current refresh to finish before connecting Spotify.", 409)
+
     try:
         with oauth_lock:
             if not oauth or time.monotonic() - oauth["created"] > 600:
@@ -188,7 +192,7 @@ def callback():
             })
             if not data.get("refresh_token"):
                 raise SpotifyError("Spotify did not return a refresh token")
-            store.set_many({"refresh_token": data["refresh_token"]})
+            store.set_many({"refresh_token": data["refresh_token"]}, clear_cache=True)
             oauth.clear()
 
         return home("Spotify is connected.")
@@ -197,6 +201,8 @@ def callback():
     except RequestException:
         log.exception("Spotify connection failed")
         return home("Spotify is unreachable; try connecting again.", 502)
+    finally:
+        refresh.lock.release()
 
 
 def run_refresh(key=None):
