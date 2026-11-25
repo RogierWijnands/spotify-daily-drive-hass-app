@@ -10,7 +10,7 @@ SHOWS = [
     ("1lr6j4z70G5xke70V6nHhI", 1),  # Alledaagse Vragen
     ("3Ab6DGFJL7VE5ToIH4r6w1", 1),  # Lang Verhaal Kort
 ]
-TARGET = 120 * 60 * 1000
+TARGET = 90 * 60 * 1000
 TOLERANCE = 2 * 60 * 1000
 
 
@@ -140,7 +140,7 @@ def select_music(groups, podcasts, rng):
     chosen.extend(remaining[i] for i in best)
     duration = podcast_ms + sum(item["duration_ms"] for item in chosen)
     if abs(duration - TARGET) > TOLERANCE:
-        raise SpotifyError("Not enough suitable music to stay within 118-122 minutes")
+        raise SpotifyError("Not enough suitable music to stay within 88-92 minutes")
     return chosen
 
 

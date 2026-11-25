@@ -25,15 +25,6 @@ class Store:
                     episodes TEXT NOT NULL, detail TEXT NOT NULL
                 );
             """)
-            # Migrate status values written by earlier versions without discarding history.
-            db.execute("""
-                UPDATE history SET status = CASE status
-                    WHEN 'bezig' THEN 'in_progress'
-                    WHEN 'geslaagd' THEN 'succeeded'
-                    WHEN 'mislukt' THEN 'failed'
-                    WHEN 'onzeker' THEN 'uncertain'
-                    ELSE status END
-            """)
             db.execute("""
                 UPDATE history SET status='failed', detail='App stopped before replacing the playlist'
                 WHERE status='in_progress' AND id NOT IN (SELECT history_id FROM pending)

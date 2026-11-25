@@ -6,7 +6,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from app.refresh import Refresh
-from app.selection import NEWS, SHOWS, TOLERANCE, TARGET, build, interleave, music_candidates, select_music, podcast_candidates
+from app.selection import NEWS, SHOWS, build, interleave, music_candidates, select_music, podcast_candidates
 from app.spotify import Spotify, SpotifyError, authorization, callback_code, playlist_id
 from app.store import Store
 
@@ -23,7 +23,7 @@ class SelectionTests(unittest.TestCase):
         podcasts = [{"uri": f"spotify:episode:{i}", "duration_ms": 7 * 60000} for i in range(5)]
         music = select_music(groups, podcasts, random.Random(3))
         total = sum(x["duration_ms"] for x in music + podcasts)
-        self.assertLessEqual(abs(total - TARGET), TOLERANCE)
+        self.assertLessEqual(abs(total - 90 * 60000), 2 * 60000)
         self.assertTrue(any(x in groups[0] for x in music))
         self.assertTrue(any(x in groups[1] for x in music))
         self.assertEqual(len({x["uri"] for x in music}), len(music))
@@ -31,13 +31,20 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(interleave(music, podcasts, random.Random(2))), len(music) + 5)
 
     def test_too_little_music_fails(self):
-        with self.assertRaises(SpotifyError):
+        with self.assertRaisesRegex(SpotifyError, "88-92 minutes"):
             select_music([[track(1)], [], [], []], [], random.Random(1))
 
     def test_long_podcasts_are_kept_with_music(self):
-        podcasts = [{"uri": "spotify:episode:1", "duration_ms": 121 * 60000}]
+        podcasts = [{"uri": "spotify:episode:1", "duration_ms": 91 * 60000}]
         music = select_music([[track(1)], [], [], []], podcasts, random.Random(1))
         self.assertEqual(len(music), 1)
+
+    def test_duration_accepts_both_tolerance_boundaries(self):
+        for podcast_minutes, total_minutes in ((84, 88), (88, 92)):
+            with self.subTest(total_minutes=total_minutes):
+                podcasts = [{"uri": "spotify:episode:1", "duration_ms": podcast_minutes * 60000}]
+                music = select_music([[track(1)], [], [], []], podcasts, random.Random(1))
+                self.assertEqual(sum(item["duration_ms"] for item in music + podcasts), total_minutes * 60000)
 
     def test_fetches_and_mixes_four_news_and_two_other_podcasts(self):
         class Fake:
@@ -56,6 +63,9 @@ class SelectionTests(unittest.TestCase):
         positions = [i for i, item in enumerate(result) if item in episodes]
         self.assertTrue(all(b - a > 1 for a, b in zip(positions, positions[1:])))
         self.assertGreater(positions[0], 0)
+        gaps = [positions[0]] + [b - a - 1 for a, b in zip(positions, positions[1:])]
+        gaps.append(len(result) - positions[-1] - 1)
+        self.assertLessEqual(max(gaps) - min(gaps), 1)
 
     def test_fourth_news_episode_can_come_from_next_page(self):
         class Fake:
@@ -104,7 +114,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(items), len(set(items)))
         self.assertTrue(set(episodes).issubset(items))
         self.assertIn("minutes", detail)
-        self.assertLessEqual(abs((len(items) - 6) * 4 + 42 - 120), 2)
+        self.assertLessEqual(abs((len(items) - 6) * 4 + 42 - 90), 2)
 
     def test_liked_tracks_are_filtered_and_can_fill_the_mix(self):
         def song(number, playable=True):
@@ -128,7 +138,7 @@ class SelectionTests(unittest.TestCase):
         selected = select_music(groups, podcasts, random.Random(3))
         self.assertTrue(selected)
         self.assertTrue(all(item in groups[-1] for item in selected))
-        self.assertLessEqual(abs(sum(i["duration_ms"] for i in selected + podcasts) - TARGET), TOLERANCE)
+        self.assertLessEqual(abs(sum(i["duration_ms"] for i in selected + podcasts) - 90 * 60000), 2 * 60000)
 
 
 class SpotifyTests(unittest.TestCase):
@@ -251,27 +261,6 @@ class RefreshTests(unittest.TestCase):
         restored = Store(self.store.path)
         self.assertEqual(restored.history()[0]["status"], "uncertain")
         self.assertIsNotNone(restored.pending())
-
-    def test_existing_dutch_history_and_pending_change_survive_upgrade(self):
-        self.store.set_many({"refresh_token": "saved-token"})
-        with self.store.connect() as db:
-            for status in ("geslaagd", "mislukt", "onzeker", "bezig", "bezig"):
-                cursor = db.execute("INSERT INTO history (started, status, detail) VALUES (?, ?, ?)",
-                                    ("2026-01-01", status, "original detail"))
-            history_id = cursor.lastrowid
-        self.store.prepare(history_id, "target", ["old"], ["new"], ["episode"], "detail")
-        upgraded = Store(self.store.path)
-        self.assertEqual([entry["status"] for entry in upgraded.history()],
-                         ["uncertain", "failed", "uncertain", "failed", "succeeded"])
-        self.assertEqual(upgraded.history()[-1]["detail"], "original detail")
-        self.assertEqual(upgraded.get("refresh_token"), "saved-token")
-        self.assertEqual(upgraded.pending()["history_id"], history_id)
-        class Fake:
-            def playlist_items(self, pid):
-                return ["new"]
-        self.assertTrue(Refresh(upgraded).reconcile(Fake()))
-        self.assertEqual(upgraded.history()[0]["status"], "succeeded")
-        self.assertEqual(upgraded.used_episodes(), {"episode"})
 
 
 if __name__ == "__main__":
