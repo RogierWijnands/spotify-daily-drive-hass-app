@@ -15,6 +15,7 @@ Spotify used to have Daily Drive, a playlist that combines your favorite music, 
 - Automatic refresh: **00:00, 04:00, 08:00, 12:00, 16:00, 20:00** (`Europe/Amsterdam`). The app must be running; missed times are not retried.
 - Updates: push the new version to GitHub, then select **Check for updates** in the app store. Local and repository installations have separate data.
 - After upgrading from version 0.1.0, reconnect Spotify and grant library access.
+- After upgrading to version 0.1.9, reconnect Spotify and grant access to followed artists. For local use, run `python -m app.cli --authorize`.
 - Tokens, settings and history are stored privately in `/data/daily_drive.sqlite3`. Removing the app or its data can delete them.
 
 ## News and podcast shows
@@ -40,6 +41,7 @@ https://open.spotify.com/show/3Ab6DGFJL7VE5ToIH4r6w1, 1
 - **Episodes:** the latest playable episodes take priority. News and podcasts are mixed with music where possible. No duplicates within a playlist; previously used episodes can recur while still latest.
 - **Music:** top, recent and liked tracks; releases by favorite artists and their collaborators; optional source playlists. Discoveries are not Spotify recommendations and individual sources are not guaranteed in every refresh.
 - **History:** Spotify's longest top-artist and top-track ranges cover approximately one year, not all time.
+- **Artists:** all available top and followed artists are combined, deduplicated and shuffled; up to eight are selected for release discovery per refresh.
 - **Collaborators:** up to four are selected randomly; up to two albums or singles each are searched, favoring recent releases.
 - **Source playlists:** new Spotify apps can read only playlists you own or collaborate on. Copy Discover Weekly or Release Radar into your own playlists to use them; the copies do not update automatically.
 - **Duration:** target 90 minutes ±2 minutes and 70/30 music/podcasts. Episodes take priority, so duration and ratio can differ.

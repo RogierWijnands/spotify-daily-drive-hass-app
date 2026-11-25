@@ -145,8 +145,6 @@ class SelectionTests(unittest.TestCase):
                     return {"items": [song(i) for i in range(start, start + 10)]}
                 if path == "/me/player/recently-played":
                     return {"items": [{"track": song(1)}]}
-                if path == "/me/top/artists":
-                    return {"items": [{"id": "artist"}]}
                 if path == "/artists/artist/albums":
                     return {"items": [{"id": "album", "release_date": "2026-01-01"}]}
                 if path == "/albums/album/tracks":
@@ -156,7 +154,12 @@ class SelectionTests(unittest.TestCase):
             def pages(self, path, params, max_items=1000):
                 if path == "/me/tracks":
                     return [{"track": song(i)} for i in range(50, 55)]
+                if path == "/me/top/artists":
+                    return [{"id": "artist"}]
                 return [{"item": song(i)} for i in range(45, 50)]
+
+            def followed_artists(self):
+                return []
 
         items, episodes, detail = build(Fake(), ["source"], NEWS_SHOWS, PODCAST_SHOWS, random.Random(7))
         self.assertEqual(len(episodes), 6)
@@ -175,9 +178,14 @@ class SelectionTests(unittest.TestCase):
                 return {"items": []}
 
             def pages(self, path, params, max_items=1000):
+                if path == "/me/top/artists":
+                    return []
                 self.request = (path, params, max_items)
                 return ([{"track": song(i)} for i in range(30)] +
                         [{"track": song(99, False)}, {"track": None}])
+
+            def followed_artists(self):
+                return []
 
         api = Fake()
         groups = music_candidates(api, [], random.Random(2))
@@ -202,11 +210,6 @@ class SelectionTests(unittest.TestCase):
                 self.top_artist_params = None
 
             def get(self, path, **params):
-                if path == "/me/top/artists":
-                    self.top_artist_params = params
-                    if params.get("time_range") == "long_term":
-                        return {"items": [{"id": "favorite"}, {"id": "other-favorite"}]}
-                    return {"items": []}
                 if path.startswith("/artists/"):
                     artist = path.split("/")[2]
                     self.requested_artists.append((artist, params["include_groups"]))
@@ -226,11 +229,17 @@ class SelectionTests(unittest.TestCase):
                 return {"items": []}
 
             def pages(self, path, params, max_items=1000):
+                if path == "/me/top/artists":
+                    self.top_artist_params = (params, max_items)
+                    return [{"id": "favorite"}, {"id": "other-favorite"}]
+                return []
+
+            def followed_artists(self):
                 return []
 
         api = Fake()
         groups = music_candidates(api, [], random.Random(2))
-        self.assertEqual(api.top_artist_params, {"time_range": "long_term", "limit": 20})
+        self.assertEqual(api.top_artist_params, ({"time_range": "long_term"}, None))
         self.assertCountEqual(api.requested_artists, [
             ("favorite", "album,single,appears_on"),
             ("other-favorite", "album,single,appears_on"),
@@ -247,8 +256,6 @@ class SelectionTests(unittest.TestCase):
                 self.collaborators = []
 
             def get(self, path, **params):
-                if path == "/me/top/artists":
-                    return {"items": [{"id": "favorite"}]}
                 if path == "/artists/favorite/albums":
                     return {"items": [{"id": "favorite-album"}]}
                 if path == "/albums/favorite-album/tracks":
@@ -260,12 +267,72 @@ class SelectionTests(unittest.TestCase):
                 return {"items": []}
 
             def pages(self, path, params, max_items=1000):
+                if path == "/me/top/artists":
+                    return [{"id": "favorite"}]
+                return []
+
+            def followed_artists(self):
                 return []
 
         api = Fake()
         music_candidates(api, [], random.Random(1))
         self.assertEqual(len(api.collaborators), 4)
         self.assertEqual(len(set(api.collaborators)), 4)
+
+    def test_artist_pool_uses_all_pages_before_selecting_eight(self):
+        class Fake:
+            pages = Spotify.pages
+
+            def __init__(self):
+                self.offsets = []
+                self.selected = []
+
+            def get(self, path, **params):
+                if path == "/me/top/artists":
+                    self.offsets.append(params["offset"])
+                    if params["time_range"] != "long_term" or params["limit"] != 50:
+                        raise AssertionError(params)
+                    start = params["offset"]
+                    return {"items": [{"id": str(i)} for i in range(start, min(start + 50, 75))],
+                            "next": "next" if start == 0 else None}
+                if path.startswith("/artists/"):
+                    self.selected.append(int(path.split("/")[2]))
+                return {"items": [], "next": None}
+
+            def followed_artists(self):
+                return []
+
+        api = Fake()
+        music_candidates(api, [], random.Random(5))
+        self.assertEqual(api.offsets, [0, 50])
+        self.assertEqual(len(api.selected), 8)
+        self.assertTrue(any(artist >= 50 for artist in api.selected))
+
+    def test_followed_artists_are_deduplicated_and_their_tracks_are_candidates(self):
+        class Fake:
+            def __init__(self):
+                self.selected = []
+
+            def get(self, path, **params):
+                if path.startswith("/artists/"):
+                    artist = path.split("/")[2]
+                    self.selected.append(artist)
+                    return {"items": [{"id": artist}]}
+                if path == "/albums/followed/tracks":
+                    return {"items": [{"id": "song", "type": "track", "uri": "spotify:track:song",
+                                       "is_playable": True, "duration_ms": 180000}]}
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                return [{"id": "both"}] if path == "/me/top/artists" else []
+
+            def followed_artists(self):
+                return [{"id": "both"}, {"id": "followed"}]
+
+        api = Fake()
+        groups = music_candidates(api, [], random.Random(1))
+        self.assertCountEqual(api.selected, ["both", "followed"])
+        self.assertEqual([item["id"] for item in groups[2]], ["song"])
 
 
 class SpotifyTests(unittest.TestCase):
@@ -289,6 +356,7 @@ class SpotifyTests(unittest.TestCase):
         self.assertGreaterEqual(len(verifier), 43)
         self.assertEqual(query["state"], [state])
         self.assertIn("user-library-read", query["scope"][0].split())
+        self.assertIn("user-follow-read", query["scope"][0].split())
         self.assertEqual(callback_code("http://127.0.0.1:8888/callback?code=abc&state=" + state, state), "abc")
         with self.assertRaises(ValueError):
             callback_code("http://127.0.0.1:8888/callback?code=abc&state=wrong", state)
@@ -305,6 +373,42 @@ class SpotifyTests(unittest.TestCase):
         self.assertEqual(len(api.pages("/me/tracks", max_items=None)), 1050)
         with self.assertRaises(SpotifyError):
             api.pages("/me/tracks")
+
+    def test_followed_artists_use_cursor_pagination(self):
+        api = Spotify.__new__(Spotify)
+        requests_seen = []
+
+        def get(path, **params):
+            requests_seen.append((path, params))
+            if "after" not in params:
+                return {"artists": {"items": [{"id": "first"}], "next": "next",
+                                    "cursors": {"after": "first"}}}
+            return {"artists": {"items": [{"id": "second"}], "next": None,
+                                "cursors": {"after": None}}}
+
+        api.get = get
+        self.assertEqual(api.followed_artists(), [{"id": "first"}, {"id": "second"}])
+        self.assertEqual(requests_seen, [
+            ("/me/following", {"type": "artist", "limit": 50}),
+            ("/me/following", {"type": "artist", "limit": 50, "after": "first"}),
+        ])
+
+    def test_invalid_followed_artist_cursor_fails(self):
+        api = Spotify.__new__(Spotify)
+        api.get = lambda *args, **kwargs: {
+            "artists": {"items": [{"id": "first"}], "next": "next", "cursors": {"after": "first"}}
+        }
+        with self.assertRaisesRegex(SpotifyError, "pagination cursor"):
+            api.followed_artists()
+
+    def test_missing_follow_permission_gives_reconnect_guidance(self):
+        api = Spotify.__new__(Spotify)
+        api.token = "token"
+        with patch("app.spotify.requests.request") as request:
+            request.return_value.ok = False
+            request.return_value.status_code = 403
+            with self.assertRaisesRegex(SpotifyError, "reconnect Spotify.*followed artists"):
+                api.followed_artists()
 
     def test_missing_library_permission_gives_reconnect_guidance(self):
         api = Spotify.__new__(Spotify)

@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import requests
 
 REDIRECT_URI = "http://127.0.0.1:8888/callback"
-SCOPES = "user-top-read user-read-recently-played user-library-read playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public"
+SCOPES = "user-top-read user-read-recently-played user-library-read user-follow-read playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public"
 API = "https://api.spotify.com/v1"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 
@@ -102,6 +102,11 @@ class Spotify:
         if not response.ok:
             if path == "/me/tracks" and response.status_code == 403:
                 raise SpotifyError("Liked tracks are inaccessible (HTTP 403); reconnect Spotify and grant library access")
+            if path == "/me/following" and response.status_code in (401, 403):
+                raise SpotifyError(
+                    f"Followed artists are inaccessible (HTTP {response.status_code}); "
+                    "reconnect Spotify and grant access to followed artists"
+                )
             raise SpotifyError(f"Spotify {method} {path} failed (HTTP {response.status_code})")
         return response.json() if response.content else {}
 
@@ -123,6 +128,22 @@ class Spotify:
             offset += len(items)
             if max_items is not None and offset >= max_items:
                 raise SpotifyError(f"Too many items in {path}; change aborted")
+
+    def followed_artists(self):
+        result = []
+        seen_cursors = set()
+        params = {"type": "artist", "limit": 50}
+
+        while True:
+            page = self.get("/me/following", **params)["artists"]
+            result.extend(page["items"])
+            if not page["next"]:
+                return result
+            cursor = page["cursors"]["after"]
+            if not cursor or cursor in seen_cursors:
+                raise SpotifyError("Spotify returned an invalid followed-artist pagination cursor")
+            seen_cursors.add(cursor)
+            params["after"] = cursor
 
     def playlist_items(self, pid):
         entries = self.pages(f"/playlists/{pid}/items", {"additional_types": "track,episode", "market": "NL"})
