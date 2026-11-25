@@ -9,7 +9,7 @@ A local Home Assistant app that fills a Spotify playlist with music and podcasts
 3. Create an app with Web API access on [Spotify for Developers](https://developer.spotify.com/dashboard). For Development Mode, the owner needs Spotify Premium. Add `http://127.0.0.1:8888/callback` as the exact redirect URI.
 4. Create a Spotify playlist named Daily Drive. Enter the Spotify client ID and this playlist's URL in the app. Optionally add URLs for playlists you own or collaborate on, one per line, and save the settings.
 5. Select **Start connection**, open the Spotify link and grant access. An error page may appear after the redirect: copy the entire URL from the address bar and paste it into the app. The URL contains a one-time authorization code: do not share it. Nothing needs to listen on port 8888.
-6. Select **Refresh now** and check the history and the Home Assistant app log. Automatic refreshes run at 09:00, 14:00 and 18:00 in `Europe/Amsterdam` while the app is running. Missed refresh times are not retried.
+6. Select **Refresh now** and check the history and the Home Assistant app log. Automatic refreshes run at 00:00, 04:00, 08:00, 12:00, 16:00 and 20:00 in `Europe/Amsterdam` while the app is running. Missed refresh times are not retried.
 
 After updating from version 0.1.0, reconnect Spotify and grant permission to read your library. Without that permission, refreshes fail and the existing playlist remains intact.
 

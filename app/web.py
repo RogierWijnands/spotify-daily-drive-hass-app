@@ -23,6 +23,7 @@ app.config["MAX_CONTENT_LENGTH"] = 32 * 1024
 csrf = secrets.token_urlsafe(32)
 oauth = {}
 oauth_lock = threading.Lock()
+REFRESH_TIMES = ("00:00", "04:00", "08:00", "12:00", "16:00", "20:00")
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -58,7 +59,7 @@ An error page may appear after authorization; copy the full URL from the address
 <form action="callback" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label>Callback URL <input name="callback" required autocomplete="off"></label><button>Complete connection</button></form>
 {% endif %}
-<h2>Refresh</h2><p>Automatically at 09:00, 14:00 and 18:00 (Europe/Amsterdam).</p>
+<h2>Refresh</h2><p>Automatically at {{ refresh_times | join(', ') }} (Europe/Amsterdam).</p>
 <form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh now</button></form>
 <h2>History</h2><table><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr>
 {% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}</td><td>{{ entry.detail }}</td></tr>{% endfor %}
@@ -89,7 +90,7 @@ def home(message=None, status=200):
                                   target=store.get("playlist_id", ""),
                                   sources="\n".join(store.get("source_ids", [])),
                                   connected=bool(store.get("refresh_token")), pending=store.pending(),
-                                  history=store.history()), status
+                                  history=store.history(), refresh_times=REFRESH_TIMES), status
 
 
 @app.get("/")
@@ -195,7 +196,7 @@ def scheduler():
     while True:
         now = datetime.now(tz)
         clock = now.strftime("%H:%M")
-        if clock in {"09:00", "14:00", "18:00"}:
+        if clock in REFRESH_TIMES:
             run_refresh(now.strftime("%Y-%m-%d") + " " + clock)
         time.sleep(15)
 

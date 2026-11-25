@@ -1,6 +1,9 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
+from unittest.mock import call, patch
+from zoneinfo import ZoneInfo
 
 # The module normally writes to Home Assistant's private /data directory.
 temp = tempfile.TemporaryDirectory()
@@ -19,6 +22,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'<html lang="en">', response.data)
         self.assertIn(b"Connect Spotify", response.data)
+        self.assertIn(b"00:00, 04:00, 08:00, 12:00, 16:00, 20:00", response.data)
         self.assertEqual(self.client.post("/refresh", environ_overrides=self.remote).status_code, 403)
 
     def test_configuration_accepts_urls_and_rejects_target_as_source(self):
@@ -39,6 +43,26 @@ class WebTests(unittest.TestCase):
         finally:
             web.refresh.lock.release()
         self.assertEqual(response.status_code, 409)
+
+    def test_scheduler_runs_six_times_in_amsterdam_time(self):
+        amsterdam = ZoneInfo("Europe/Amsterdam")
+        for date in ((2026, 1, 15), (2026, 7, 15)):
+            with self.subTest(date=date):
+                local_times = [datetime(*date, hour, 0, 0, tzinfo=amsterdam) for hour in range(24)]
+                local_times += [datetime(*date, 8, 1, tzinfo=amsterdam),
+                                datetime(*date, 20, 59, tzinfo=amsterdam)]
+                utc_times = [value.astimezone(timezone.utc) for value in local_times]
+                with patch("app.web.datetime") as clock, patch("app.web.run_refresh") as run, \
+                     patch("app.web.time.sleep", side_effect=[None] * 25 + [StopIteration]):
+                    clock.now.side_effect = lambda tz: utc_times.pop(0).astimezone(tz)
+                    with self.assertRaises(StopIteration):
+                        web.scheduler()
+                self.assertEqual(run.call_args_list, [
+                    call(f"{date[0]:04}-{date[1]:02}-{date[2]:02} {hour:02}:00")
+                    for hour in (0, 4, 8, 12, 16, 20)
+                ])
+                self.assertEqual(clock.now.call_count, 26)
+                self.assertTrue(all(c.args[0].key == "Europe/Amsterdam" for c in clock.now.call_args_list))
 
 
 if __name__ == "__main__":

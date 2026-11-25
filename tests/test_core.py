@@ -197,8 +197,8 @@ class RefreshTests(unittest.TestCase):
         api = Fake()
         with patch("app.refresh.Spotify", return_value=api), patch(
                 "app.refresh.build", return_value=(["new"], ["episode"], "120 minutes")):
-            self.service.run("2026-01-01 09:00")
-            self.service.run("2026-01-01 09:00")
+            self.service.run("2026-01-01 08:00")
+            self.service.run("2026-01-01 08:00")
         self.assertEqual(api.items, ["new"])
         self.assertEqual(self.store.history()[0]["status"], "succeeded")
         self.assertEqual(self.store.used_episodes(), {"episode"})
