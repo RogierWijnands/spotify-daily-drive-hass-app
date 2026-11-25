@@ -12,7 +12,9 @@ from waitress import serve
 
 from .refresh import Refresh
 from .shows import format_show_lines, parse_show_lines, validate_shows
-from .spotify import REDIRECT_URI, SpotifyError, authorization, callback_code, playlist_id, token_request
+from .spotify import (
+    REDIRECT_URI, SpotifyError, authorization, callback_code, playlist_id, token_request,
+)
 from .store import Store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -74,6 +76,7 @@ An error page may appear after authorization; copy the full URL from the address
 
 @app.before_request
 def ingress_only():
+    # Home Assistant's ingress proxy is the only supported entry point.
     if request.remote_addr != "172.30.32.2":
         abort(403)
     if request.method == "POST" and not secrets.compare_digest(request.form.get("csrf", ""), csrf):
@@ -91,14 +94,23 @@ def security_headers(response):
 def home(message=None, status=200):
     with oauth_lock:
         auth_url = oauth.get("url")
-    return render_template_string(PAGE, csrf=csrf, message=message, auth_url=auth_url,
-                                  redirect_uri=REDIRECT_URI, client_id=store.get("client_id", ""),
-                                  target=store.get("playlist_id", ""),
-                                  sources="\n".join(store.get("source_ids", [])),
-                                  news_shows=format_show_lines(store.get("news_shows", [])),
-                                  podcast_shows=format_show_lines(store.get("podcast_shows", [])),
-                                  connected=bool(store.get("refresh_token")), pending=store.pending(),
-                                  history=store.history(), refresh_times=REFRESH_TIMES), status
+
+    return render_template_string(
+        PAGE,
+        csrf=csrf,
+        message=message,
+        auth_url=auth_url,
+        redirect_uri=REDIRECT_URI,
+        client_id=store.get("client_id", ""),
+        target=store.get("playlist_id", ""),
+        sources="\n".join(store.get("source_ids", [])),
+        news_shows=format_show_lines(store.get("news_shows", [])),
+        podcast_shows=format_show_lines(store.get("podcast_shows", [])),
+        connected=bool(store.get("refresh_token")),
+        pending=store.pending(),
+        history=store.history(),
+        refresh_times=REFRESH_TIMES,
+    ), status
 
 
 @app.get("/")
@@ -112,18 +124,28 @@ def configure():
         client_id = request.form.get("client_id", "").strip()
         if len(client_id) != 32 or not client_id.isascii() or not client_id.isalnum():
             raise ValueError("Invalid Spotify client ID")
+
         target = playlist_id(request.form.get("target", ""))
-        sources = list(dict.fromkeys(playlist_id(line) for line in request.form.get("sources", "").splitlines()
-                                     if line.strip()))
+        sources = list(dict.fromkeys(
+            playlist_id(line)
+            for line in request.form.get("sources", "").splitlines()
+            if line.strip()
+        ))
         if target in sources:
             raise ValueError("Daily Drive cannot also be a source playlist")
-        news, podcasts = validate_shows(parse_show_lines(request.form.get("news_shows", "")),
-                                        parse_show_lines(request.form.get("podcast_shows", "")))
+
+        news, podcasts = validate_shows(
+            parse_show_lines(request.form.get("news_shows", "")),
+            parse_show_lines(request.form.get("podcast_shows", "")),
+        )
         if not refresh.lock.acquire(blocking=False):
             raise ValueError("Wait for the current refresh to finish")
+
         try:
-            values = {"client_id": client_id, "playlist_id": target, "source_ids": sources,
-                      "news_shows": news, "podcast_shows": podcasts}
+            values = {
+                "client_id": client_id, "playlist_id": target, "source_ids": sources,
+                "news_shows": news, "podcast_shows": podcasts,
+            }
             if client_id != store.get("client_id"):
                 values["refresh_token"] = None
                 with oauth_lock:
@@ -131,6 +153,7 @@ def configure():
             store.set_many(values)
         finally:
             refresh.lock.release()
+
         return home("Settings saved.")
     except ValueError as exc:
         return home(str(exc), 400)
@@ -141,6 +164,7 @@ def authorize():
     client_id = store.get("client_id")
     if not client_id:
         return home("Save your client ID first.", 400)
+
     url, verifier, state = authorization(client_id)
     with oauth_lock:
         oauth.clear()
@@ -156,13 +180,17 @@ def callback():
                 raise ValueError("Connection expired; start again")
             if oauth["client_id"] != store.get("client_id"):
                 raise ValueError("Client ID changed; start again")
+
             code = callback_code(request.form.get("callback", ""), oauth["state"])
-            data = token_request({"client_id": oauth["client_id"], "grant_type": "authorization_code",
-                                  "code": code, "redirect_uri": REDIRECT_URI, "code_verifier": oauth["verifier"]})
+            data = token_request({
+                "client_id": oauth["client_id"], "grant_type": "authorization_code",
+                "code": code, "redirect_uri": REDIRECT_URI, "code_verifier": oauth["verifier"],
+            })
             if not data.get("refresh_token"):
                 raise SpotifyError("Spotify did not return a refresh token")
             store.set_many({"refresh_token": data["refresh_token"]})
             oauth.clear()
+
         return home("Spotify is connected.")
     except (ValueError, SpotifyError) as exc:
         return home(str(exc), 400)
@@ -183,6 +211,7 @@ def run_refresh(key=None):
 def manual_refresh():
     if refresh.lock.locked():
         return home("A refresh is already running.", 409)
+
     threading.Thread(target=run_refresh, daemon=True).start()
     return home("Refresh started; reload this page for the status.")
 
@@ -193,21 +222,25 @@ def release_pending():
         return home("First confirm that you have checked the playlist.", 400)
     if not refresh.lock.acquire(blocking=False):
         return home("A refresh is already running.", 409)
+
     try:
         store.release_pending()
     except ValueError as exc:
         return home(str(exc), 400)
     finally:
         refresh.lock.release()
+
     return home("Block released; the previous outcome remains unknown.")
 
 
 def scheduler():
     tz = ZoneInfo("Europe/Amsterdam")
+
     while True:
         now = datetime.now(tz)
         clock = now.strftime("%H:%M")
         if clock in REFRESH_TIMES:
+            # The stored key prevents duplicate runs during the same minute.
             run_refresh(now.strftime("%Y-%m-%d") + " " + clock)
         time.sleep(15)
 

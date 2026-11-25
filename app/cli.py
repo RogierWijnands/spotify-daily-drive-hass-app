@@ -11,7 +11,9 @@ from requests import RequestException
 from .refresh import Refresh
 from .selection import build_items
 from .shows import validate_shows
-from .spotify import REDIRECT_URI, Spotify, SpotifyError, authorization, callback_code, playlist_id, token_request
+from .spotify import (
+    REDIRECT_URI, Spotify, SpotifyError, authorization, callback_code, playlist_id, token_request,
+)
 from .store import Store
 
 
@@ -20,6 +22,7 @@ def read_config(path):
         config = json.load(file)
     if not isinstance(config, dict):
         raise ValueError("Configuration must be a JSON object")
+
     client_id = config.get("client_id")
     if not isinstance(client_id, str) or len(client_id) != 32 or not client_id.isascii() or not client_id.isalnum():
         raise ValueError("client_id must be a Spotify client ID of 32 letters or digits")
@@ -27,6 +30,7 @@ def read_config(path):
     sources = config.get("source_playlists", [])
     if not isinstance(target, str) or not isinstance(sources, list) or not all(isinstance(s, str) for s in sources):
         raise ValueError("playlist must be a URL or ID and source_playlists a list of URLs or IDs")
+
     target_id = playlist_id(target)
     source_ids = list(dict.fromkeys(playlist_id(source) for source in sources))
     if target_id in source_ids:
@@ -41,8 +45,10 @@ def connect_spotify(store, client_id):
     print("Then copy the full URL from the address bar, even if an error page appears.")
     callback = getpass("Callback URL (input hidden): ")
     code = callback_code(callback, state)
-    token = token_request({"client_id": client_id, "grant_type": "authorization_code",
-                           "code": code, "redirect_uri": REDIRECT_URI, "code_verifier": verifier})
+    token = token_request({
+        "client_id": client_id, "grant_type": "authorization_code",
+        "code": code, "redirect_uri": REDIRECT_URI, "code_verifier": verifier,
+    })
     if not token.get("refresh_token"):
         raise SpotifyError("Spotify did not return a refresh token")
     store.set_many({"refresh_token": token["refresh_token"]})
@@ -51,13 +57,17 @@ def connect_spotify(store, client_id):
 
 def preview(store):
     api = Spotify(store)
+    # Match the real refresh's safety check without replacing the playlist.
     api.playlist_items(store.get("playlist_id"))
-    items, _, detail = build_items(api, store.get("source_ids", []), store.get("news_shows", []),
-                                   store.get("podcast_shows", []))
+    items, _, detail = build_items(
+        api, store.get("source_ids", []), store.get("news_shows", []),
+        store.get("podcast_shows", []),
+    )
     if len(items) > 100:
         raise SpotifyError("Spotify allows at most 100 items per replacement")
     print("Dry run: the Spotify playlist was not changed.")
     print(detail)
+
     for index, item in enumerate(items, 1):
         artists = ", ".join(artist["name"] for artist in item.get("artists", []) if artist.get("name"))
         title = item.get("name") or item["uri"]
@@ -68,8 +78,10 @@ def preview(store):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Test or refresh Daily Drive without Home Assistant.")
-    parser.add_argument("--config", type=Path, default=Path("local-config.json"),
-                        help="JSON configuration (default: local-config.json)")
+    parser.add_argument(
+        "--config", type=Path, default=Path("local-config.json"),
+        help="JSON configuration (default: local-config.json)",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--authorize", action="store_true", help="Connect Spotify and exit")
     mode.add_argument("--apply", action="store_true", help="Replace the actual Spotify playlist")
@@ -77,17 +89,22 @@ def main(argv=None):
     mode.add_argument("--release-pending", action="store_true", help="Manually release an uncertain change")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
     try:
         config_path = args.config.expanduser().resolve()
         client_id, target, sources, news, podcasts = read_config(config_path)
         store = Store(str(config_path.parent / ".daily-drive.sqlite3"))
         if client_id != store.get("client_id") and store.pending():
             raise SpotifyError("An uncertain playlist change is still pending; use the original client ID first")
-        values = {"client_id": client_id, "playlist_id": target, "source_ids": sources,
-                  "news_shows": news, "podcast_shows": podcasts}
+
+        values = {
+            "client_id": client_id, "playlist_id": target, "source_ids": sources,
+            "news_shows": news, "podcast_shows": podcasts,
+        }
         if client_id != store.get("client_id"):
             values["refresh_token"] = None
         store.set_many(values)
+
         if args.authorize:
             connect_spotify(store, client_id)
         elif args.pending:

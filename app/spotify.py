@@ -18,12 +18,14 @@ class SpotifyError(RuntimeError):
 def _spotify_id(value, kind):
     value = value.strip()
     parsed = urlparse(value)
+
     if parsed.scheme == "https" and parsed.netloc == "open.spotify.com":
         parts = parsed.path.strip("/").split("/")
         if len(parts) == 2 and parts[0] == kind:
             value = parts[1]
     elif value.startswith(f"spotify:{kind}:"):
         value = value.removeprefix(f"spotify:{kind}:")
+
     if len(value) != 22 or not value.isascii() or not value.isalnum():
         raise ValueError(f"Invalid Spotify {kind} URL or ID")
     return value
@@ -38,14 +40,21 @@ def show_id(value):
 
 
 def authorization(client_id):
+    # PKCE binds the authorization code to this request without a client secret.
     verifier = secrets.token_urlsafe(64)
     state = secrets.token_urlsafe(32)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-    url = "https://accounts.spotify.com/authorize?" + urlencode({
-        "client_id": client_id, "response_type": "code", "redirect_uri": REDIRECT_URI,
-        "scope": SCOPES, "state": state, "code_challenge_method": "S256",
-        "code_challenge": challenge,
-    })
+    url = "https://accounts.spotify.com/authorize?" + urlencode(
+        {
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": REDIRECT_URI,
+            "scope": SCOPES,
+            "state": state,
+            "code_challenge_method": "S256",
+            "code_challenge": challenge,
+        }
+    )
     return url, verifier, state
 
 
@@ -54,6 +63,7 @@ def callback_code(url, state):
     expected = urlparse(REDIRECT_URI)
     if (parsed.scheme, parsed.netloc, parsed.path) != (expected.scheme, expected.netloc, expected.path):
         raise ValueError("The callback URL does not match the expected address")
+
     params = parse_qs(parsed.query)
     if len(params.get("state", [])) != 1 or not secrets.compare_digest(params["state"][0], state):
         raise ValueError("Spotify state does not match; start again")
@@ -78,14 +88,17 @@ class Spotify:
         refresh = store.get("refresh_token")
         if not client_id or not refresh:
             raise SpotifyError("Connect Spotify in the settings first")
+
         token = token_request({"grant_type": "refresh_token", "refresh_token": refresh, "client_id": client_id})
         if token.get("refresh_token"):
             store.set_many({"refresh_token": token["refresh_token"]})
         self.token = token["access_token"]
 
     def request(self, method, path, **kwargs):
-        response = requests.request(method, API + path, headers={"Authorization": "Bearer " + self.token},
-                                    timeout=30, **kwargs)
+        response = requests.request(
+            method, API + path, headers={"Authorization": "Bearer " + self.token},
+            timeout=30, **kwargs,
+        )
         if not response.ok:
             if path == "/me/tracks" and response.status_code == 403:
                 raise SpotifyError("Liked tracks are inaccessible (HTTP 403); reconnect Spotify and grant library access")
@@ -100,6 +113,7 @@ class Spotify:
         params["limit"] = 50
         offset = 0
         result = []
+
         while True:
             page = self.get(path, **params, offset=offset)
             items = page["items"]
@@ -113,6 +127,8 @@ class Spotify:
     def playlist_items(self, pid):
         entries = self.pages(f"/playlists/{pid}/items", {"additional_types": "track,episode", "market": "NL"})
         result = []
+
+        # Unreadable items prevent a reliable before/after comparison after a timeout.
         for entry in entries:
             item = entry.get("item")
             if not item or entry.get("is_local") or not item.get("uri"):

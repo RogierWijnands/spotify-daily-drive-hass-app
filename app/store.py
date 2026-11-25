@@ -25,6 +25,7 @@ class Store:
                     episodes TEXT NOT NULL, detail TEXT NOT NULL
                 );
             """)
+            # Only a persisted pending write can have reached Spotify before a restart.
             db.execute("""
                 UPDATE history SET status='failed', detail='App stopped before replacing the playlist'
                 WHERE status='in_progress' AND id NOT IN (SELECT history_id FROM pending)
@@ -52,8 +53,10 @@ class Store:
 
     def set_many(self, values):
         with self.connect() as db:
-            db.executemany("INSERT OR REPLACE INTO settings VALUES (?, ?)",
-                           [(k, json.dumps(v)) for k, v in values.items()])
+            db.executemany(
+                "INSERT OR REPLACE INTO settings VALUES (?, ?)",
+                [(k, json.dumps(v)) for k, v in values.items()],
+            )
 
     def history(self):
         with self.connect() as db:
@@ -62,11 +65,15 @@ class Store:
 
     def start(self, scheduled_key=None):
         now = datetime.now(timezone.utc).isoformat()
+
         with self.connect() as db:
             try:
-                cursor = db.execute("INSERT INTO history (started,status,detail,scheduled_key) VALUES (?,?,?,?)",
-                                    (now, "in_progress", "", scheduled_key))
+                cursor = db.execute(
+                    "INSERT INTO history (started,status,detail,scheduled_key) VALUES (?,?,?,?)",
+                    (now, "in_progress", "", scheduled_key),
+                )
             except sqlite3.IntegrityError:
+                # The unique scheduled key prevents multiple runs in the same minute.
                 return None
             return cursor.lastrowid
 
@@ -83,6 +90,7 @@ class Store:
             row = db.execute("SELECT * FROM pending WHERE id=1").fetchone()
         if not row:
             return None
+
         result = dict(row)
         for key in ("before_items", "after_items", "episodes"):
             result[key] = json.loads(result[key])
@@ -90,22 +98,31 @@ class Store:
 
     def prepare(self, history_id, playlist_id, before, after, episodes, detail):
         with self.connect() as db:
-            db.execute("INSERT INTO pending VALUES (1,?,?,?,?,?,?)",
-                       (history_id, playlist_id, json.dumps(before), json.dumps(after),
-                        json.dumps(episodes), detail))
+            db.execute(
+                "INSERT INTO pending VALUES (1,?,?,?,?,?,?)",
+                (history_id, playlist_id, json.dumps(before), json.dumps(after),
+                 json.dumps(episodes), detail),
+            )
 
     def resolve(self, success, detail=None):
         now = datetime.now(timezone.utc).isoformat()
+
+        # Update the history and remove the pending write in one transaction.
         with self.connect() as db:
             row = db.execute("SELECT * FROM pending WHERE id=1").fetchone()
             if not row:
                 raise RuntimeError("No pending playlist change")
+
             if success:
-                db.executemany("INSERT OR REPLACE INTO episodes VALUES (?,?)",
-                               [(uri, now) for uri in json.loads(row["episodes"])])
-            db.execute("UPDATE history SET status=?,detail=? WHERE id=?",
-                       ("succeeded" if success else "failed",
-                        detail or row["detail"], row["history_id"]))
+                db.executemany(
+                    "INSERT OR REPLACE INTO episodes VALUES (?,?)",
+                    [(uri, now) for uri in json.loads(row["episodes"])],
+                )
+            db.execute(
+                "UPDATE history SET status=?,detail=? WHERE id=?",
+                ("succeeded" if success else "failed",
+                 detail or row["detail"], row["history_id"]),
+            )
             db.execute("DELETE FROM pending WHERE id=1")
 
     def release_pending(self):
@@ -113,6 +130,9 @@ class Store:
             row = db.execute("SELECT history_id FROM pending WHERE id=1").fetchone()
             if not row:
                 raise ValueError("There is no uncertain change")
-            db.execute("UPDATE history SET status=?,detail=? WHERE id=?",
-                       ("uncertain", "Manually released; outcome not determined", row["history_id"]))
+
+            db.execute(
+                "UPDATE history SET status=?,detail=? WHERE id=?",
+                ("uncertain", "Manually released; outcome not determined", row["history_id"]),
+            )
             db.execute("DELETE FROM pending WHERE id=1")

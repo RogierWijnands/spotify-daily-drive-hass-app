@@ -20,18 +20,22 @@ class CliTests(unittest.TestCase):
         self.path = Path(self.temp.name) / "config.json"
         self.client_id = "a" * 32
         self.target = "0" * 22
-        self.path.write_text(json.dumps({"client_id": self.client_id, "playlist": self.target,
-                                        "source_playlists": []}), encoding="utf-8")
+        self.path.write_text(
+            json.dumps({"client_id": self.client_id, "playlist": self.target, "source_playlists": []}),
+            encoding="utf-8",
+        )
         self.db = str(self.path.parent / ".daily-drive.sqlite3")
 
     def test_authorize_stores_refresh_token_without_printing_it(self):
         token = "private-refresh-token"
         callback = "http://127.0.0.1:8888/callback?code=abc&state=state"
+
         with patch("app.cli.authorization", return_value=("https://spotify.example", "verifier", "state")), \
              patch("app.cli.getpass", return_value=callback), \
              patch("app.cli.token_request", return_value={"refresh_token": token}), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             result = cli.main(["--config", str(self.path), "--authorize"])
+
         self.assertEqual(result, 0)
         self.assertNotIn(token, output.getvalue())
         self.assertEqual(Store(self.db).get("refresh_token"), token)
@@ -39,10 +43,12 @@ class CliTests(unittest.TestCase):
     def test_preview_displays_items_without_writing_playlist(self):
         item = {"uri": "spotify:track:1", "name": "Song", "duration_ms": 180000,
                 "artists": [{"name": "Artist"}]}
+
         with patch("app.cli.Spotify") as spotify, \
              patch("app.cli.build_items", return_value=([item], [], "120 minutes")), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             result = cli.main(["--config", str(self.path)])
+
         self.assertEqual(result, 0)
         spotify.return_value.playlist_items.assert_called_once_with(self.target)
         spotify.return_value.replace.assert_not_called()
@@ -54,14 +60,18 @@ class CliTests(unittest.TestCase):
         class FakeSpotify:
             def __init__(self, store):
                 pass
+
             def playlist_items(self, pid):
                 return ["old"]
+
             def replace(self, pid, items):
                 self.replaced = (pid, items)
+
         fake = FakeSpotify(None)
         with patch("app.refresh.Spotify", return_value=fake), \
              patch("app.refresh.build", return_value=(["new"], ["episode"], "120 minutes")):
             result = cli.main(["--config", str(self.path), "--apply"])
+
         self.assertEqual(result, 0)
         self.assertEqual(fake.replaced, (self.target, ["new"]))
         store = Store(self.db)
@@ -78,13 +88,18 @@ class CliTests(unittest.TestCase):
 
     def test_show_configuration_is_saved_and_validated(self):
         show = "1" * 22
-        config = {"client_id": self.client_id, "playlist": self.target,
-                  "news_shows": [{"show": f"https://open.spotify.com/show/{show}", "count": 4}],
-                  "podcast_shows": []}
+        config = {
+            "client_id": self.client_id,
+            "playlist": self.target,
+            "news_shows": [{"show": f"https://open.spotify.com/show/{show}", "count": 4}],
+            "podcast_shows": [],
+        }
         self.path.write_text(json.dumps(config), encoding="utf-8")
+
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(["--config", str(self.path), "--pending"]), 0)
         self.assertEqual(Store(self.db).get("news_shows"), [{"show": show, "count": 4}])
+
         for invalid in (True, 0, "4"):
             with self.subTest(invalid=invalid):
                 config["news_shows"][0]["count"] = invalid
@@ -97,8 +112,10 @@ class CliTests(unittest.TestCase):
         self.path.rename(self.path.parent / "local-config.json")
         env = os.environ.copy()
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
-        result = subprocess.run([sys.executable, "-m", "app.cli", "--pending"],
-                                cwd=self.temp.name, env=env, capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, "-m", "app.cli", "--pending"],
+            cwd=self.temp.name, env=env, capture_output=True, text=True,
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("No uncertain playlist change", result.stdout)
 
@@ -107,6 +124,7 @@ class CliTests(unittest.TestCase):
         store.set_many({"client_id": "b" * 32})
         history = store.start()
         store.prepare(history, self.target, ["old"], ["new"], [], "detail")
+
         with contextlib.redirect_stderr(io.StringIO()) as output:
             result = cli.main(["--config", str(self.path)])
         self.assertEqual(result, 1)
@@ -118,16 +136,20 @@ class CliTests(unittest.TestCase):
         store.set_many({"client_id": self.client_id})
         history = store.start()
         store.prepare(history, self.target, ["old"], ["new"], [], "detail")
+
         with contextlib.redirect_stdout(io.StringIO()) as output:
             result = cli.main(["--config", str(self.path), "--pending"])
         self.assertEqual(result, 0)
         self.assertIn("old", output.getvalue())
         self.assertIn("new", output.getvalue())
+
         with patch("builtins.input", return_value="no"), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(["--config", str(self.path), "--release-pending"]), 1)
         self.assertIsNotNone(Store(self.db).pending())
+
         with patch("builtins.input", return_value="CONFIRM"):
             self.assertEqual(cli.main(["--config", str(self.path), "--release-pending"]), 0)
+
         store = Store(self.db)
         self.assertIsNone(store.pending())
         self.assertEqual(store.history()[0]["status"], "uncertain")

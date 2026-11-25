@@ -16,6 +16,8 @@ class Refresh:
         pending = self.store.pending()
         if not pending:
             return None
+
+        # Compare with both snapshots before deciding whether a lost write succeeded.
         actual = api.playlist_items(pending["playlist_id"])
         if actual == pending["after_items"]:
             self.store.resolve(True, pending["detail"] + " (confirmed afterwards)")
@@ -30,11 +32,13 @@ class Refresh:
         if not self.lock.acquire(blocking=False):
             log.warning("Refresh skipped: another refresh is already running")
             raise SpotifyError("A refresh is already running")
+
         history_id = None
         try:
             history_id = self.store.start(scheduled_key)
             if history_id is None:
                 return
+
             api = Spotify(self.store)
             self.reconcile(api)
             pid = self.store.get("playlist_id")
@@ -43,15 +47,21 @@ class Refresh:
             source_ids = self.store.get("source_ids", [])
             if pid in source_ids:
                 raise SpotifyError("Daily Drive cannot also be a music source")
+
             before = api.playlist_items(pid)
-            after, episodes, detail = build(api, source_ids, self.store.get("news_shows", []),
-                                            self.store.get("podcast_shows", []))
+            after, episodes, detail = build(
+                api, source_ids, self.store.get("news_shows", []),
+                self.store.get("podcast_shows", []),
+            )
             if len(after) > 100:
                 raise SpotifyError("Spotify allows at most 100 items per replacement")
+
             previously_used = self.store.used_episodes()
             repeated = sum(uri in previously_used for uri in episodes)
             if repeated:
                 detail += f"; {repeated} latest episodes used previously"
+
+            # Persist the snapshots before sending the single replacement request.
             self.store.prepare(history_id, pid, before, after, episodes, detail)
             try:
                 api.replace(pid, after)
