@@ -1,6 +1,7 @@
 import logging
 import os
 import secrets
+import sqlite3
 import threading
 import time
 from datetime import datetime
@@ -75,7 +76,17 @@ An error page may appear after authorization; copy the full URL from the address
 <form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh now</button></form>
 <h2>History</h2><table><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr>
 {% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}</td><td>{{ entry.detail }}</td></tr>{% endfor %}
-</table></body></html>"""
+</table>
+<h2>Storage</h2>
+<p>SQLite database: {{ storage_bytes }} bytes ({{ "%.2f" | format(storage_bytes / 1048576) }} MiB).
+Temporary SQLite journal files are not included.</p>
+<p>Clear cached tracks and artists, refresh history and used episodes. Settings and the Spotify
+connection are kept. This cannot be undone and does not change the Spotify playlist.</p>
+<form action="clear-storage" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+<label><input style="width:auto" type="checkbox" name="confirm" required>
+I understand that cached data and history will be deleted.</label>
+<button>Clear stored data</button></form>
+</body></html>"""
 
 
 @app.before_request
@@ -114,6 +125,7 @@ def home(message=None, status=200):
         pending=store.pending(),
         history=store.history(),
         refresh_times=REFRESH_TIMES,
+        storage_bytes=os.path.getsize(store.path),
     ), status
 
 
@@ -244,6 +256,32 @@ def release_pending():
         refresh.lock.release()
 
     return home("Block released; the previous outcome remains unknown.")
+
+
+@app.post("/clear-storage")
+def clear_storage():
+    if request.form.get("confirm") != "on":
+        return home("First confirm that stored data will be deleted.", 400)
+    if not refresh.lock.acquire(blocking=False):
+        return home("Wait for the current refresh to finish before clearing data.", 409)
+
+    try:
+        try:
+            store.clear_data()
+        except ValueError as exc:
+            return home(str(exc), 409)
+        except sqlite3.Error:
+            log.exception("Failed to clear stored data")
+            return home("Could not clear stored data; check the app log.", 500)
+
+        try:
+            store.compact()
+        except sqlite3.Error:
+            log.exception("Failed to compact database after clearing stored data")
+            return home("Data was cleared, but storage could not be reclaimed; check the app log.", 500)
+        return home("Stored data cleared. Settings and the Spotify connection were kept.")
+    finally:
+        refresh.lock.release()
 
 
 def scheduler():

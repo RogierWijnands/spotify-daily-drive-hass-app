@@ -5,7 +5,7 @@ Spotify used to have Daily Drive, a playlist that combines your favorite music, 
 ## Installation
 
 1. In Home Assistant, go to **Settings → Apps → Install app → menu → Repositories**. Add `https://github.com/RogierWijnands/spotify-daily-drive-hass-app`.
-2. Install and start **Daily Drive**, then open its web interface. Home Assistant builds the container locally.
+2. Install and start **Daily Drive**, then select **Open web UI** on the app page to access its settings. Home Assistant builds the container locally.
 3. Create a [Spotify Developer app](https://developer.spotify.com/dashboard) with Web API access. Register `http://127.0.0.1:8888/callback` as the exact redirect URI. Development Mode requires Spotify Premium for the app owner.
 4. Create a Spotify playlist for Daily Drive. Enter its URL and your Spotify client ID in the app. Optionally add your own source playlists and [shows](#news-and-podcast-shows), then save.
 5. Select **Start connection**, open the Spotify link and grant access. Copy the full redirect URL from your browser into the app, even if an error page appears. Do not share this URL; it contains an authorization code. Nothing needs to listen on port 8888.
@@ -14,8 +14,6 @@ Spotify used to have Daily Drive, a playlist that combines your favorite music, 
 - No Spotify client secret is needed.
 - Automatic refresh: **00:00, 04:00, 08:00, 12:00, 16:00, 20:00** (`Europe/Amsterdam`). The app must be running; missed times are not retried.
 - Updates: push the new version to GitHub, then select **Check for updates** in the app store. Local and repository installations have separate data.
-- After upgrading from version 0.1.0, reconnect Spotify and grant library access.
-- After upgrading to version 0.1.9, reconnect Spotify and grant access to followed artists. For local use, run `python -m app.cli --authorize`.
 - Tokens, settings and history are stored privately in `/data/daily_drive.sqlite3`. Removing the app or its data can delete them.
 
 ## News and podcast shows

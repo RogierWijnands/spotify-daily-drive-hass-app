@@ -81,6 +81,22 @@ class Store:
                 (key, day, json.dumps(value)),
             )
 
+    def clear_data(self):
+        with self.connect() as db:
+            # Check and clear in one write transaction so a pending write is never deleted.
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM pending LIMIT 1").fetchone():
+                raise ValueError("Resolve the uncertain playlist change before clearing data")
+            db.execute("DELETE FROM daily_cache")
+            db.execute("DELETE FROM settings WHERE key='followed_artists_cache'")
+            db.execute("DELETE FROM episodes")
+            db.execute("DELETE FROM history")
+
+    def compact(self):
+        # VACUUM must run outside the data-clearing transaction.
+        with self.connect() as db:
+            db.execute("VACUUM")
+
     def history(self):
         # The web UI shows the latest 20 entries; older entries remain in SQLite.
         with self.connect() as db:

@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -10,12 +11,22 @@ from zoneinfo import ZoneInfo
 temp = tempfile.TemporaryDirectory()
 os.environ["DAILY_DRIVE_DB"] = os.path.join(temp.name, "web.sqlite")
 from app import web
+from app.store import Store
 
 
 class WebTests(unittest.TestCase):
     def setUp(self):
         self.client = web.app.test_client()
         self.remote = {"REMOTE_ADDR": "172.30.32.2"}
+
+    def isolated_store(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = Store(os.path.join(directory.name, "storage.sqlite"))
+        patcher = patch.object(web, "store", store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return store
 
     def test_ingress_and_csrf_required(self):
         self.assertEqual(self.client.get("/").status_code, 403)
@@ -113,6 +124,97 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(web.store.get_cached("liked_tracks_cache", "2026-01-01"))
         self.assertIsNone(web.store.get("followed_artists_cache"))
+
+    def test_storage_size_and_confirmed_clear_preserve_settings(self):
+        store = self.isolated_store()
+        store.set_many({"client_id": "client", "refresh_token": "token", "playlist_id": "target",
+                        "followed_artists_cache": {"artists": {"artist": "x" * 100000}}})
+        store.set_cached("liked_tracks_cache", "2026-01-01", ["x" * 100000])
+        history_id = store.start()
+        store.prepare(history_id, "target", ["old"], ["new"], ["episode"], "detail")
+        store.resolve(True)
+        before_size = os.path.getsize(store.path)
+
+        page = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(f"SQLite database: {before_size} bytes".encode(), page.data)
+        self.assertIn(b"does not change the Spotify playlist", page.data)
+        response = self.client.post("/clear-storage", data={"csrf": web.csrf, "confirm": "on"},
+                                    environ_overrides=self.remote)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Stored data cleared", response.data)
+        self.assertEqual(store.get("client_id"), "client")
+        self.assertEqual(store.get("refresh_token"), "token")
+        self.assertEqual(store.get("playlist_id"), "target")
+        self.assertIsNone(store.get("followed_artists_cache"))
+        self.assertIsNone(store.get_cached("liked_tracks_cache", "2026-01-01"))
+        self.assertEqual(store.history(), [])
+        self.assertEqual(store.used_episodes(), set())
+        self.assertLess(os.path.getsize(store.path), before_size)
+        self.assertIn(f"SQLite database: {os.path.getsize(store.path)} bytes".encode(), response.data)
+
+    def test_clear_storage_requires_confirmation_and_no_active_refresh(self):
+        store = self.isolated_store()
+        store.set_cached("liked_tracks_cache", "2026-01-01", ["track"])
+        self.assertEqual(self.client.post("/clear-storage", data={"confirm": "on"},
+                                          environ_overrides=self.remote).status_code, 403)
+        self.assertEqual(self.client.post("/clear-storage", data={"csrf": web.csrf},
+                                          environ_overrides=self.remote).status_code, 400)
+        web.refresh.lock.acquire()
+        try:
+            response = self.client.post("/clear-storage", data={"csrf": web.csrf, "confirm": "on"},
+                                        environ_overrides=self.remote)
+        finally:
+            web.refresh.lock.release()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(store.get_cached("liked_tracks_cache", "2026-01-01"), ["track"])
+
+    def test_clear_storage_keeps_pending_change_and_history(self):
+        store = self.isolated_store()
+        store.set_cached("liked_tracks_cache", "2026-01-01", ["track"])
+        history_id = store.start()
+        store.prepare(history_id, "target", ["old"], ["new"], [], "detail")
+
+        response = self.client.post("/clear-storage", data={"csrf": web.csrf, "confirm": "on"},
+                                    environ_overrides=self.remote)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn(b"Resolve the uncertain playlist change", response.data)
+        self.assertIsNotNone(store.pending())
+        self.assertEqual(len(store.history()), 1)
+        self.assertEqual(store.get_cached("liked_tracks_cache", "2026-01-01"), ["track"])
+
+    def test_clear_storage_reports_compaction_failure(self):
+        store = self.isolated_store()
+        store.set_cached("liked_tracks_cache", "2026-01-01", ["track"])
+        with patch.object(store, "compact", side_effect=sqlite3.OperationalError("disk full")), \
+             self.assertLogs("app.web", level="ERROR"):
+            response = self.client.post("/clear-storage", data={"csrf": web.csrf, "confirm": "on"},
+                                        environ_overrides=self.remote)
+        self.assertEqual(response.status_code, 500)
+        self.assertIn(b"Data was cleared, but storage could not be reclaimed", response.data)
+        self.assertIsNone(store.get_cached("liked_tracks_cache", "2026-01-01"))
+
+    def test_clear_storage_rolls_back_if_deletion_fails(self):
+        store = self.isolated_store()
+        store.set_many({"followed_artists_cache": {"artists": {"artist": {}}}})
+        store.set_cached("liked_tracks_cache", "2026-01-01", ["track"])
+        history_id = store.start()
+        store.prepare(history_id, "target", ["old"], ["new"], ["episode"], "detail")
+        store.resolve(True)
+        with store.connect() as db:
+            db.execute("""
+                CREATE TRIGGER reject_episode_deletion BEFORE DELETE ON episodes
+                BEGIN SELECT RAISE(ABORT, 'delete failed'); END
+            """)
+
+        with self.assertLogs("app.web", level="ERROR"):
+            response = self.client.post("/clear-storage", data={"csrf": web.csrf, "confirm": "on"},
+                                        environ_overrides=self.remote)
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(store.get_cached("liked_tracks_cache", "2026-01-01"), ["track"])
+        self.assertIsNotNone(store.get("followed_artists_cache"))
+        self.assertEqual(store.used_episodes(), {"episode"})
+        self.assertEqual(len(store.history()), 1)
 
     def test_scheduler_runs_six_times_in_amsterdam_time(self):
         amsterdam = ZoneInfo("Europe/Amsterdam")
