@@ -1,6 +1,9 @@
 import contextlib
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -72,6 +75,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("client_id", output.getvalue())
         self.assertFalse(Path(self.db).exists())
+
+    def test_default_config_is_local_config_json(self):
+        self.path.rename(self.path.parent / "local-config.json")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        result = subprocess.run([sys.executable, "-m", "app.cli", "--pending"],
+                                cwd=self.temp.name, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Geen onzekere playlistwijziging", result.stdout)
 
     def test_account_change_blocked_when_pending(self):
         store = Store(self.db)

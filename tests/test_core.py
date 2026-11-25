@@ -6,7 +6,7 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from app.refresh import Refresh
-from app.selection import TOLERANCE, TARGET, build, interleave, music_candidates, select_music, podcast_candidates
+from app.selection import NEWS, SHOWS, TOLERANCE, TARGET, build, interleave, music_candidates, select_music, podcast_candidates
 from app.spotify import Spotify, SpotifyError, authorization, callback_code, playlist_id
 from app.store import Store
 
@@ -39,19 +39,38 @@ class SelectionTests(unittest.TestCase):
         music = select_music([[track(1)], [], [], []], podcasts, random.Random(1))
         self.assertEqual(len(music), 1)
 
-    def test_fetches_five_distinct_latest_playable_episodes(self):
+    def test_fetches_and_mixes_four_news_and_two_other_podcasts(self):
         class Fake:
             def get(self, path, **params):
                 show = path.split("/")[2]
                 return {"next": None, "items": [
                     {"type": "episode", "uri": f"{show}:{i}", "duration_ms": 1000,
-                     "is_playable": i != 0} for i in range(4)]}
+                     "is_playable": i != 0} for i in range(5)]}
         episodes = podcast_candidates(Fake())
-        self.assertEqual(len(episodes), 5)
-        self.assertEqual(len({x["uri"] for x in episodes}), 5)
+        expected = [f"{NEWS}:1", f"{SHOWS[1][0]}:1", f"{NEWS}:2",
+                    f"{SHOWS[2][0]}:1", f"{NEWS}:3", f"{NEWS}:4"]
+        self.assertEqual([episode["uri"] for episode in episodes], expected)
+        self.assertEqual(len({x["uri"] for x in episodes}), 6)
         self.assertTrue(all(not x["uri"].endswith(":0") for x in episodes))
+        result = interleave([track(i) for i in range(12)], episodes, random.Random(1))
+        positions = [i for i, item in enumerate(result) if item in episodes]
+        self.assertTrue(all(b - a > 1 for a, b in zip(positions, positions[1:])))
+        self.assertGreater(positions[0], 0)
 
-    def test_build_uses_five_episodes_and_all_music_sources(self):
+    def test_fourth_news_episode_can_come_from_next_page(self):
+        class Fake:
+            def get(self, path, **params):
+                show = path.split("/")[2]
+                offset = params["offset"]
+                numbers = [0, 1, 2] if offset == 0 else [2, 3]
+                return {"next": "next" if offset == 0 and show == NEWS else None,
+                        "items": [{"type": "episode", "uri": f"{show}:{i}",
+                                   "duration_ms": 1000, "is_playable": True} for i in numbers]}
+        episodes = podcast_candidates(Fake())
+        self.assertEqual([x["uri"] for x in episodes if x["uri"].startswith(NEWS)],
+                         [f"{NEWS}:{i}" for i in range(4)])
+
+    def test_build_uses_six_episodes_and_all_music_sources(self):
         def song(number):
             return {"type": "track", "id": str(number), "uri": f"spotify:track:{number}",
                     "duration_ms": 4 * 60000, "is_playable": True}
@@ -62,7 +81,7 @@ class SelectionTests(unittest.TestCase):
                     show = path.split("/")[2]
                     return {"items": [{"type": "episode", "uri": f"spotify:episode:{show}-{i}",
                                        "duration_ms": 7 * 60000, "is_playable": True}
-                                      for i in range(3)], "next": None}
+                                      for i in range(4)], "next": None}
                 if path == "/me/top/tracks":
                     start = 10 if params["time_range"] == "long_term" else 0
                     return {"items": [song(i) for i in range(start, start + 10)]}
@@ -81,11 +100,11 @@ class SelectionTests(unittest.TestCase):
                 return [{"item": song(i)} for i in range(45, 50)]
 
         items, episodes, detail = build(Fake(), ["source"], random.Random(7))
-        self.assertEqual(len(episodes), 5)
+        self.assertEqual(len(episodes), 6)
         self.assertEqual(len(items), len(set(items)))
         self.assertTrue(set(episodes).issubset(items))
         self.assertIn("minuten", detail)
-        self.assertLessEqual(abs((len(items) - 5) * 4 + 35 - 120), 2)
+        self.assertLessEqual(abs((len(items) - 6) * 4 + 42 - 120), 2)
 
     def test_liked_tracks_are_filtered_and_can_fill_the_mix(self):
         def song(number, playable=True):

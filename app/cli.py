@@ -65,8 +65,8 @@ def preview(store):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Test of ververs Daily Drive zonder Home Assistant.")
-    parser.add_argument("--config", type=Path, default=Path(".daily-drive.json"),
-                        help="JSON-configuratie (standaard: .daily-drive.json)")
+    parser.add_argument("--config", type=Path, default=Path("local-config.json"),
+                        help="JSON-configuratie (standaard: local-config.json)")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--authorize", action="store_true", help="Koppel Spotify en stop")
     mode.add_argument("--apply", action="store_true", help="Vervang de echte Spotify-playlist")

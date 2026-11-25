@@ -17,10 +17,10 @@ De app vraagt alleen de Spotify-client-ID, geen client secret. Spotify-tokens, i
 
 ## Selectie en beperkingen
 
-- De drie nieuwste afspeelbare afleveringen van de opgegeven NU.nl-show, en de nieuwste afleveringen van Alledaagse Vragen en Lang Verhaal, krijgen voorrang. Dezelfde aflevering verschijnt niet tweemaal in één playlist. Eerder gebruikte afleveringen worden bijgehouden, maar blijven voorkomen zolang zij de nieuwste zijn.
+- De vier nieuwste afspeelbare afleveringen van de opgegeven NU.nl-show en de nieuwste afleveringen van Alledaagse Vragen en Lang Verhaal krijgen voorrang. Nieuws en andere podcasts worden gemengd en waar mogelijk door muziek gescheiden. Dezelfde aflevering verschijnt niet tweemaal in één playlist. Eerder gebruikte afleveringen worden bijgehouden, maar blijven voorkomen zolang zij de nieuwste zijn.
 - Muziek komt uit huidige en eerdere Spotify-toptracks, recent afgespeelde en gelikete nummers, releases en samenwerkingen van favoriete artiesten, en optionele bronplaylists. Gelikete nummers worden willekeurig uit je bibliotheek geselecteerd; niet elke refresh bevat noodzakelijk een geliket nummer. Het langste Spotify-toptrackoverzicht beslaat ongeveer één jaar en is geen volledige luistergeschiedenis. Ontdekkingen zijn geen Spotify-aanbevelingen.
 - Voor nieuwe Spotify-apps zijn alleen playlists die je zelf bezit of samen beheert uitleesbaar. Discover Weekly en Release Radar kunnen niet rechtstreeks worden uitgelezen; eigen, handmatig bijgehouden kopieën kunnen als bron worden toegevoegd. Een ontoegankelijke bron zorgt voor een mislukte refresh.
-- De app streeft naar 120 minuten ±2 minuten. De vijf nieuwste afleveringen hebben voorrang; als zij zelf te lang zijn, mag de totale duur afwijken. De podcastduur bepaalt de verhouding: 70/30 is een streven, geen garantie. Is er onvoldoende afspeelbare muziek om het doel te bereiken, dan wordt niet vervangen.
+- De app streeft naar 120 minuten ±2 minuten. De zes nieuwste afleveringen hebben voorrang; als zij zelf te lang zijn, mag de totale duur afwijken. De podcastduur bepaalt de verhouding: 70/30 is een streven, geen garantie. Is er onvoldoende afspeelbare muziek om het doel te bereiken, dan wordt niet vervangen.
 - De volledige selectie wordt vooraf gemaakt en vervolgens in één Spotify-aanvraag van maximaal 100 items vervangen. Bij een netwerkfout wordt gecontroleerd of de oude of nieuwe inhoud op Spotify staat. Als dit niet vast te stellen is, blijft de uitkomst onzeker en worden verdere wijzigingen geblokkeerd totdat de inhoud automatisch kan worden bevestigd. Mocht dat niet lukken, controleer dan de playlist in Spotify en hef de blokkade expliciet op in de app; de geschiedenis blijft de eerdere uitkomst als onzeker tonen. Een garantie dat een time-out de bestaande playlist ongemoeid liet is niet mogelijk. Wijzig de playlist niet gelijktijdig handmatig. Playlists met lokale of onleesbare items worden niet vervangen.
 - Spotify kan API-toegang beperken of rate limits opleggen. Controleer bij fouten het app-log; de bestaande playlist wordt niet gewijzigd als de voorbereiding mislukt.
 
@@ -32,10 +32,10 @@ Dit werkt zonder Home Assistant of Docker, met Python 3.9 of nieuwer:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp local-config.example.json .daily-drive.json
+cp local-config.example.json local-config.json
 ```
 
-Maak een Spotify Developer-app en registreer `http://127.0.0.1:8888/callback` als redirect-URI, zoals bij de Home Assistant-installatie hierboven. Vul vervolgens in `.daily-drive.json` de Spotify-client-ID, de URL of ID van je Daily Drive-playlist en eventueel de URL's of ID's van je eigen bronplaylists in. Gebruik bij voorkeur een aparte testplaylist.
+Maak een Spotify Developer-app en registreer `http://127.0.0.1:8888/callback` als redirect-URI, zoals bij de Home Assistant-installatie hierboven. Vul vervolgens in `local-config.json` de Spotify-client-ID, de URL of ID van je Daily Drive-playlist en eventueel de URL's of ID's van je eigen bronplaylists in. Gebruik bij voorkeur een aparte testplaylist.
 
 ```sh
 python -m app.cli --authorize  # eenmalig koppelen: open de link en plak de volledige terugkeer-URL

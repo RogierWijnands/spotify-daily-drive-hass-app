@@ -1,11 +1,12 @@
 import random
 from datetime import date, timedelta
+from itertools import zip_longest
 
 from .spotify import SpotifyError
 
 NEWS = "2EaVmyxrGQv0au2jjHki5v"  # NU.nl nieuws
 SHOWS = [
-    (NEWS, 3),
+    (NEWS, 4),
     ("1lr6j4z70G5xke70V6nHhI", 1),  # Alledaagse Vragen
     ("3Ab6DGFJL7VE5ToIH4r6w1", 1),  # Lang Verhaal Kort
 ]
@@ -21,7 +22,8 @@ def valid(item, kind):
 
 
 def podcast_candidates(api):
-    selected = []
+    news = []
+    other_podcasts = []
     seen = set()
     for show, count in SHOWS:
         # Spotify returns episodes newest first.
@@ -40,9 +42,9 @@ def podcast_candidates(api):
             offset += len(page["items"])
         if len(current) != count:
             raise SpotifyError("Niet alle nieuwste afspeelbare podcastafleveringen zijn beschikbaar")
-        selected.extend(current)
-        seen.update(item["uri"] for item in current)
-    return selected
+        (news if show == NEWS else other_podcasts).extend(current)
+    return [episode for pair in zip_longest(news, other_podcasts)
+            for episode in pair if episode is not None]
 
 
 def music_candidates(api, playlist_ids, rng):
