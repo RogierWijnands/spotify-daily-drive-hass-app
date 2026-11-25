@@ -1,5 +1,24 @@
 {
   "client_id": "YOUR_SPOTIFY_CLIENT_ID",
   "playlist": "https://open.spotify.com/playlist/YOUR_PLAYLIST_ID",
-  "source_playlists": []
+  "source_playlists": [
+    "https://open.spotify.com/playlist/PLAYLIST_ID_1",
+    "https://open.spotify.com/playlist/PLAYLIST_ID_2"
+  ],
+  "news_shows": [
+    {
+      "show": "https://open.spotify.com/show/2EaVmyxrGQv0au2jjHki5v",
+      "count": 4
+    }
+  ],
+  "podcast_shows": [
+    {
+      "show": "https://open.spotify.com/show/1lr6j4z70G5xke70V6nHhI",
+      "count": 1
+    },
+    {
+      "show": "https://open.spotify.com/show/3Ab6DGFJL7VE5ToIH4r6w1",
+      "count": 1
+    }
+  ]
 }

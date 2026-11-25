@@ -11,6 +11,7 @@ from requests import RequestException
 from waitress import serve
 
 from .refresh import Refresh
+from .shows import format_show_lines, parse_show_lines, validate_shows
 from .spotify import REDIRECT_URI, SpotifyError, authorization, callback_code, playlist_id, token_request
 from .store import Store
 
@@ -48,6 +49,11 @@ I have checked the playlist and understand that the previous outcome remains unk
 <label>Daily Drive playlist URL <input name="target" required value="{{ target }}"></label>
 <label>Source playlists you own (one Spotify URL per line)
 <textarea name="sources" rows="4">{{ sources }}</textarea></label>
+<label>News shows (one Spotify show URL and episode count per line, separated by a comma)
+<textarea name="news_shows" rows="3" placeholder="https://open.spotify.com/show/SHOW_ID, 4">{{ news_shows }}</textarea></label>
+<label>Other podcast shows (one Spotify show URL and episode count per line, separated by a comma)
+<textarea name="podcast_shows" rows="3" placeholder="https://open.spotify.com/show/SHOW_ID, 1">{{ podcast_shows }}</textarea></label>
+{% if not news_shows and not podcast_shows %}<p>No shows configured: refreshes will contain only music.</p>{% endif %}
 <button>Save settings</button></form>
 <h2>Connect Spotify</h2>
 <p>Status: {{ 'connected' if connected else 'not connected' }}.
@@ -89,6 +95,8 @@ def home(message=None, status=200):
                                   redirect_uri=REDIRECT_URI, client_id=store.get("client_id", ""),
                                   target=store.get("playlist_id", ""),
                                   sources="\n".join(store.get("source_ids", [])),
+                                  news_shows=format_show_lines(store.get("news_shows", [])),
+                                  podcast_shows=format_show_lines(store.get("podcast_shows", [])),
                                   connected=bool(store.get("refresh_token")), pending=store.pending(),
                                   history=store.history(), refresh_times=REFRESH_TIMES), status
 
@@ -109,10 +117,13 @@ def configure():
                                      if line.strip()))
         if target in sources:
             raise ValueError("Daily Drive cannot also be a source playlist")
+        news, podcasts = validate_shows(parse_show_lines(request.form.get("news_shows", "")),
+                                        parse_show_lines(request.form.get("podcast_shows", "")))
         if not refresh.lock.acquire(blocking=False):
             raise ValueError("Wait for the current refresh to finish")
         try:
-            values = {"client_id": client_id, "playlist_id": target, "source_ids": sources}
+            values = {"client_id": client_id, "playlist_id": target, "source_ids": sources,
+                      "news_shows": news, "podcast_shows": podcasts}
             if client_id != store.get("client_id"):
                 values["refresh_token"] = None
                 with oauth_lock:

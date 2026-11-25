@@ -6,9 +6,14 @@ from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from app.refresh import Refresh
-from app.selection import NEWS, SHOWS, build, interleave, music_candidates, select_music, podcast_candidates
-from app.spotify import Spotify, SpotifyError, authorization, callback_code, playlist_id
+from app.selection import build, build_items, interleave, music_candidates, select_music, podcast_candidates
+from app.spotify import Spotify, SpotifyError, authorization, callback_code, playlist_id, show_id
 from app.store import Store
+
+NEWS = "news"
+PODCASTS = ["podcast1", "podcast2"]
+NEWS_SHOWS = [{"show": NEWS, "count": 4}]
+PODCAST_SHOWS = [{"show": show, "count": 1} for show in PODCASTS]
 
 
 def track(number, minutes=4):
@@ -53,9 +58,9 @@ class SelectionTests(unittest.TestCase):
                 return {"next": None, "items": [
                     {"type": "episode", "uri": f"{show}:{i}", "duration_ms": 1000,
                      "is_playable": i != 0} for i in range(5)]}
-        episodes = podcast_candidates(Fake())
-        expected = [f"{NEWS}:1", f"{SHOWS[1][0]}:1", f"{NEWS}:2",
-                    f"{SHOWS[2][0]}:1", f"{NEWS}:3", f"{NEWS}:4"]
+        episodes = podcast_candidates(Fake(), NEWS_SHOWS, PODCAST_SHOWS)
+        expected = [f"{NEWS}:1", f"{PODCASTS[0]}:1", f"{NEWS}:2",
+                    f"{PODCASTS[1]}:1", f"{NEWS}:3", f"{NEWS}:4"]
         self.assertEqual([episode["uri"] for episode in episodes], expected)
         self.assertEqual(len({x["uri"] for x in episodes}), 6)
         self.assertTrue(all(not x["uri"].endswith(":0") for x in episodes))
@@ -76,9 +81,49 @@ class SelectionTests(unittest.TestCase):
                 return {"next": "next" if offset == 0 and show == NEWS else None,
                         "items": [{"type": "episode", "uri": f"{show}:{i}",
                                    "duration_ms": 1000, "is_playable": True} for i in numbers]}
-        episodes = podcast_candidates(Fake())
+        episodes = podcast_candidates(Fake(), NEWS_SHOWS, PODCAST_SHOWS)
         self.assertEqual([x["uri"] for x in episodes if x["uri"].startswith(NEWS)],
                          [f"{NEWS}:{i}" for i in range(4)])
+
+    def test_empty_shows_do_not_fetch_episodes(self):
+        class Fake:
+            def get(self, *args, **kwargs):
+                raise AssertionError("No shows should be fetched")
+        self.assertEqual(podcast_candidates(Fake(), [], []), [])
+
+    def test_build_without_shows_produces_music_only(self):
+        songs = [track(i) for i in range(25)]
+        with patch("app.selection.music_candidates", return_value=[songs]):
+            items, episodes, detail = build_items(object(), [], [], [], random.Random(1))
+        self.assertEqual(episodes, [])
+        self.assertTrue(items)
+        self.assertLessEqual(abs(sum(item["duration_ms"] for item in items) - 90 * 60000), 2 * 60000)
+        self.assertIn("podcasts 0.0%", detail)
+
+    def test_unavailable_configured_episodes_fail(self):
+        class Fake:
+            def get(self, path, **params):
+                return {"items": [], "next": None}
+        with self.assertRaisesRegex(SpotifyError, "Not enough playable episodes"):
+            podcast_candidates(Fake(), NEWS_SHOWS, [])
+
+    def test_selects_configured_show_counts_and_interleaves_categories(self):
+        class Fake:
+            def get(self, path, **params):
+                show = path.split("/")[2]
+                return {"items": [{"type": "episode", "uri": f"{show}:{i}",
+                                   "duration_ms": 1000, "is_playable": True}
+                                  for i in range(3)], "next": None}
+        news = [{"show": "first", "count": 1}, {"show": "second", "count": 2}]
+        podcasts = [{"show": "other", "count": 2}]
+        episodes = podcast_candidates(Fake(), news, podcasts)
+        self.assertEqual([item["uri"] for item in episodes],
+                         ["first:0", "other:0", "second:0", "other:1", "second:1"])
+
+    def test_episode_count_leaves_room_for_one_music_track(self):
+        podcasts = [{"uri": f"spotify:episode:{i}", "duration_ms": 60000} for i in range(99)]
+        music = select_music([[track(1)], [track(2)]], podcasts, random.Random(1))
+        self.assertEqual(len(music), 1)
 
     def test_build_uses_six_episodes_and_all_music_sources(self):
         def song(number):
@@ -109,7 +154,7 @@ class SelectionTests(unittest.TestCase):
                     return [{"track": song(i)} for i in range(50, 55)]
                 return [{"item": song(i)} for i in range(45, 50)]
 
-        items, episodes, detail = build(Fake(), ["source"], random.Random(7))
+        items, episodes, detail = build(Fake(), ["source"], NEWS_SHOWS, PODCAST_SHOWS, random.Random(7))
         self.assertEqual(len(episodes), 6)
         self.assertEqual(len(items), len(set(items)))
         self.assertTrue(set(episodes).issubset(items))
@@ -148,6 +193,13 @@ class SpotifyTests(unittest.TestCase):
         for value in ("https://evil.example/playlist/" + pid, "https://open.spotify.com/track/" + pid):
             with self.assertRaises(ValueError):
                 playlist_id(value)
+
+    def test_show_url_validation(self):
+        sid = "0123456789ABCDEFGHIJKL"
+        self.assertEqual(show_id("https://open.spotify.com/show/" + sid + "?si=test"), sid)
+        self.assertEqual(show_id("spotify:show:" + sid), sid)
+        with self.assertRaises(ValueError):
+            show_id("https://open.spotify.com/playlist/" + sid)
 
     def test_pkce_state_and_callback(self):
         url, verifier, state = authorization("client")
@@ -204,6 +256,14 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.store.used_episodes(), {"episode"})
         self.assertIsNone(self.store.pending())
         self.assertEqual(len(self.store.history()), 1)
+
+    def test_refresh_passes_configured_shows_to_selection(self):
+        self.store.set_many({"news_shows": NEWS_SHOWS, "podcast_shows": PODCAST_SHOWS})
+        with patch("app.refresh.Spotify") as spotify, patch(
+                "app.refresh.build", return_value=(["new"], [], "detail")) as build_mock:
+            spotify.return_value.playlist_items.return_value = ["old"]
+            self.service.run()
+        build_mock.assert_called_once_with(spotify.return_value, [], NEWS_SHOWS, PODCAST_SHOWS)
 
     def test_uncertain_write_is_reconciled_without_another_write(self):
         class Fake:

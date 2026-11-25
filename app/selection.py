@@ -4,12 +4,6 @@ from itertools import zip_longest
 
 from .spotify import SpotifyError
 
-NEWS = "2EaVmyxrGQv0au2jjHki5v"  # NU.nl news
-SHOWS = [
-    (NEWS, 4),
-    ("1lr6j4z70G5xke70V6nHhI", 1),  # Alledaagse Vragen
-    ("3Ab6DGFJL7VE5ToIH4r6w1", 1),  # Lang Verhaal Kort
-]
 TARGET = 90 * 60 * 1000
 TOLERANCE = 2 * 60 * 1000
 
@@ -21,28 +15,29 @@ def valid(item, kind):
             and not item.get("restrictions"))
 
 
-def podcast_candidates(api):
+def podcast_candidates(api, news_shows, podcast_shows):
     news = []
     other_podcasts = []
     seen = set()
-    for show, count in SHOWS:
-        # Spotify returns episodes newest first.
-        current = []
-        offset = 0
-        while len(current) < count:
-            page = api.get(f"/shows/{show}/episodes", market="NL", limit=50, offset=offset)
-            for item in page["items"]:
-                if valid(item, "episode") and item["uri"] not in seen:
-                    current.append(item)
-                    seen.add(item["uri"])
-                    if len(current) == count:
-                        break
-            if not page.get("next") or not page["items"]:
-                break
-            offset += len(page["items"])
-        if len(current) != count:
-            raise SpotifyError("Not all latest playable podcast episodes are available")
-        (news if show == NEWS else other_podcasts).extend(current)
+    for shows, episodes in ((news_shows, news), (podcast_shows, other_podcasts)):
+        for entry in shows:
+            show, count = entry["show"], entry["count"]
+            current = []
+            offset = 0
+            while len(current) < count:
+                page = api.get(f"/shows/{show}/episodes", market="NL", limit=50, offset=offset)
+                for item in page["items"]:
+                    if valid(item, "episode") and item["uri"] not in seen:
+                        current.append(item)
+                        seen.add(item["uri"])
+                        if len(current) == count:
+                            break
+                if not page.get("next") or not page["items"]:
+                    break
+                offset += len(page["items"])
+            if len(current) != count:
+                raise SpotifyError(f"Not enough playable episodes are available for show {show}")
+            episodes.extend(current)
     return [episode for pair in zip_longest(news, other_podcasts)
             for episode in pair if episode is not None]
 
@@ -111,7 +106,7 @@ def select_music(groups, podcasts, rng):
         normalized.append(pool)
     # Reserve one current and one older favorite if each exists.
     for pool in normalized[:2]:
-        if pool:
+        if pool and len(chosen) < 100 - len(podcasts):
             chosen.append(pool.pop())
     remaining = [item for pool in normalized for item in pool]
     rng.shuffle(remaining)
@@ -159,9 +154,9 @@ def interleave(music, podcasts, rng):
     return output
 
 
-def build_items(api, playlist_ids, rng=None):
+def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None):
     rng = rng or random.SystemRandom()
-    podcasts = podcast_candidates(api)
+    podcasts = podcast_candidates(api, news_shows, podcast_shows)
     groups = music_candidates(api, playlist_ids, rng)
     music = select_music(groups, podcasts, rng)
     result = interleave(music, podcasts, rng)
@@ -171,6 +166,6 @@ def build_items(api, playlist_ids, rng=None):
     return result, [item["uri"] for item in podcasts], detail
 
 
-def build(api, playlist_ids, rng=None):
-    items, episodes, detail = build_items(api, playlist_ids, rng)
+def build(api, playlist_ids, news_shows, podcast_shows, rng=None):
+    items, episodes, detail = build_items(api, playlist_ids, news_shows, podcast_shows, rng)
     return [item["uri"] for item in items], episodes, detail

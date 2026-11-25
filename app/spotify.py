@@ -15,18 +15,26 @@ class SpotifyError(RuntimeError):
     pass
 
 
-def playlist_id(value):
+def _spotify_id(value, kind):
     value = value.strip()
     parsed = urlparse(value)
     if parsed.scheme == "https" and parsed.netloc == "open.spotify.com":
         parts = parsed.path.strip("/").split("/")
-        if len(parts) == 2 and parts[0] == "playlist":
+        if len(parts) == 2 and parts[0] == kind:
             value = parts[1]
-    elif value.startswith("spotify:playlist:"):
-        value = value.removeprefix("spotify:playlist:")
+    elif value.startswith(f"spotify:{kind}:"):
+        value = value.removeprefix(f"spotify:{kind}:")
     if len(value) != 22 or not value.isascii() or not value.isalnum():
-        raise ValueError("Invalid Spotify playlist URL or ID")
+        raise ValueError(f"Invalid Spotify {kind} URL or ID")
     return value
+
+
+def playlist_id(value):
+    return _spotify_id(value, "playlist")
+
+
+def show_id(value):
+    return _spotify_id(value, "show")
 
 
 def authorization(client_id):

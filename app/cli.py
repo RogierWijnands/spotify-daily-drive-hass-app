@@ -10,6 +10,7 @@ from requests import RequestException
 
 from .refresh import Refresh
 from .selection import build_items
+from .shows import validate_shows
 from .spotify import REDIRECT_URI, Spotify, SpotifyError, authorization, callback_code, playlist_id, token_request
 from .store import Store
 
@@ -30,7 +31,8 @@ def read_config(path):
     source_ids = list(dict.fromkeys(playlist_id(source) for source in sources))
     if target_id in source_ids:
         raise ValueError("Daily Drive cannot also be a music source")
-    return client_id, target_id, source_ids
+    news, podcasts = validate_shows(config.get("news_shows", []), config.get("podcast_shows", []))
+    return client_id, target_id, source_ids, news, podcasts
 
 
 def connect_spotify(store, client_id):
@@ -50,7 +52,8 @@ def connect_spotify(store, client_id):
 def preview(store):
     api = Spotify(store)
     api.playlist_items(store.get("playlist_id"))
-    items, _, detail = build_items(api, store.get("source_ids", []))
+    items, _, detail = build_items(api, store.get("source_ids", []), store.get("news_shows", []),
+                                   store.get("podcast_shows", []))
     if len(items) > 100:
         raise SpotifyError("Spotify allows at most 100 items per replacement")
     print("Dry run: the Spotify playlist was not changed.")
@@ -76,11 +79,12 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     try:
         config_path = args.config.expanduser().resolve()
-        client_id, target, sources = read_config(config_path)
+        client_id, target, sources, news, podcasts = read_config(config_path)
         store = Store(str(config_path.parent / ".daily-drive.sqlite3"))
         if client_id != store.get("client_id") and store.pending():
             raise SpotifyError("An uncertain playlist change is still pending; use the original client ID first")
-        values = {"client_id": client_id, "playlist_id": target, "source_ids": sources}
+        values = {"client_id": client_id, "playlist_id": target, "source_ids": sources,
+                  "news_shows": news, "podcast_shows": podcasts}
         if client_id != store.get("client_id"):
             values["refresh_token"] = None
         store.set_many(values)

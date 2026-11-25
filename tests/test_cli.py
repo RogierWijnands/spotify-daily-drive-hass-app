@@ -76,6 +76,23 @@ class CliTests(unittest.TestCase):
         self.assertIn("client_id", output.getvalue())
         self.assertFalse(Path(self.db).exists())
 
+    def test_show_configuration_is_saved_and_validated(self):
+        show = "1" * 22
+        config = {"client_id": self.client_id, "playlist": self.target,
+                  "news_shows": [{"show": f"https://open.spotify.com/show/{show}", "count": 4}],
+                  "podcast_shows": []}
+        self.path.write_text(json.dumps(config), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["--config", str(self.path), "--pending"]), 0)
+        self.assertEqual(Store(self.db).get("news_shows"), [{"show": show, "count": 4}])
+        for invalid in (True, 0, "4"):
+            with self.subTest(invalid=invalid):
+                config["news_shows"][0]["count"] = invalid
+                self.path.write_text(json.dumps(config), encoding="utf-8")
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(cli.main(["--config", str(self.path), "--pending"]), 1)
+                self.assertEqual(Store(self.db).get("news_shows"), [{"show": show, "count": 4}])
+
     def test_default_config_is_local_config_json(self):
         self.path.rename(self.path.parent / "local-config.json")
         env = os.environ.copy()

@@ -44,7 +44,8 @@ class Refresh:
             if pid in source_ids:
                 raise SpotifyError("Daily Drive cannot also be a music source")
             before = api.playlist_items(pid)
-            after, episodes, detail = build(api, source_ids)
+            after, episodes, detail = build(api, source_ids, self.store.get("news_shows", []),
+                                            self.store.get("podcast_shows", []))
             if len(after) > 100:
                 raise SpotifyError("Spotify allows at most 100 items per replacement")
             previously_used = self.store.used_episodes()
