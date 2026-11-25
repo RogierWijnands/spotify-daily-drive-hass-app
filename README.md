@@ -4,14 +4,16 @@ A local Home Assistant app that fills a Spotify playlist with music and podcasts
 
 ## Installation
 
-1. Copy the project folder to the Home Assistant local apps folder as `local_apps/daily_drive`. Depending on the Samba or SSH app used, this folder may also be called `addons`. See the [Home Assistant guide](https://contributors.home-assistant.io/apps/first-app/).
-2. Go to **Settings → Apps → App Store**, select **Check for updates**, install **Daily Drive** under local apps and start it. Open the web interface through Home Assistant.
+1. In Home Assistant, go to **Settings → Apps**, select **Install app**, then select **Repositories** from the top-right menu. Add `https://github.com/RogierWijnands/spotify-daily-drive-hass-app`.
+2. Find **Daily Drive** under the added repository in the app store, install it and start it. Open the web interface through Home Assistant. The Raspberry Pi builds the container locally during installation and updates.
 3. Create an app with Web API access on [Spotify for Developers](https://developer.spotify.com/dashboard). For Development Mode, the owner needs Spotify Premium. Add `http://127.0.0.1:8888/callback` as the exact redirect URI.
 4. Create a Spotify playlist named Daily Drive. Enter the Spotify client ID and this playlist's URL in the app. Optionally add URLs for playlists you own or collaborate on, one per line, and save the settings.
 5. Select **Start connection**, open the Spotify link and grant access. An error page may appear after the redirect: copy the entire URL from the address bar and paste it into the app. The URL contains a one-time authorization code: do not share it. Nothing needs to listen on port 8888.
 6. Select **Refresh now** and check the history and the Home Assistant app log. Automatic refreshes run at 00:00, 04:00, 08:00, 12:00, 16:00 and 20:00 in `Europe/Amsterdam` while the app is running. Missed refresh times are not retried.
 
 After updating from version 0.1.0, reconnect Spotify and grant permission to read your library. Without that permission, refreshes fail and the existing playlist remains intact.
+
+The repository changes must be committed and pushed to GitHub before Home Assistant can install them. To update the app, push a new version and select **Check for updates** in the app store. A local app installation and an installation from this repository are separate apps with separate data.
 
 The app only requires a Spotify client ID, not a client secret. Spotify tokens, settings, refresh history and used episodes are stored in `/data/daily_drive.sqlite3`. This storage is private to the app and persists across restarts. Removing the app or its data can delete the history and connection.
 
