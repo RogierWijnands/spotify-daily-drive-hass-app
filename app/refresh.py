@@ -18,18 +18,18 @@ class Refresh:
             return None
         actual = api.playlist_items(pending["playlist_id"])
         if actual == pending["after_items"]:
-            self.store.resolve(True, pending["detail"] + " (achteraf bevestigd)")
+            self.store.resolve(True, pending["detail"] + " (confirmed afterwards)")
             return True
         elif actual == pending["before_items"]:
-            self.store.resolve(False, "Spotify-wijziging niet doorgevoerd")
+            self.store.resolve(False, "Spotify change was not applied")
             return False
         else:
-            raise SpotifyError("Uitkomst van eerdere wijziging onzeker; controleer de playlist en herstel deze handmatig")
+            raise SpotifyError("Previous change has an uncertain outcome; check and restore the playlist manually")
 
     def run(self, scheduled_key=None):
         if not self.lock.acquire(blocking=False):
-            log.warning("Verversen overgeslagen: er loopt al een verversing")
-            raise SpotifyError("Er loopt al een verversing")
+            log.warning("Refresh skipped: another refresh is already running")
+            raise SpotifyError("A refresh is already running")
         history_id = None
         try:
             history_id = self.store.start(scheduled_key)
@@ -39,18 +39,18 @@ class Refresh:
             self.reconcile(api)
             pid = self.store.get("playlist_id")
             if not pid:
-                raise SpotifyError("Stel eerst de Daily Drive-playlist in")
+                raise SpotifyError("Configure the Daily Drive playlist first")
             source_ids = self.store.get("source_ids", [])
             if pid in source_ids:
-                raise SpotifyError("Daily Drive mag niet ook een muziekbron zijn")
+                raise SpotifyError("Daily Drive cannot also be a music source")
             before = api.playlist_items(pid)
             after, episodes, detail = build(api, source_ids)
             if len(after) > 100:
-                raise SpotifyError("Spotify staat maximaal 100 items per vervanging toe")
+                raise SpotifyError("Spotify allows at most 100 items per replacement")
             previously_used = self.store.used_episodes()
             repeated = sum(uri in previously_used for uri in episodes)
             if repeated:
-                detail += f"; {repeated} eerder gebruikte nieuwste afleveringen"
+                detail += f"; {repeated} latest episodes used previously"
             self.store.prepare(history_id, pid, before, after, episodes, detail)
             try:
                 api.replace(pid, after)
@@ -58,13 +58,13 @@ class Refresh:
                 # A lost response does not imply Spotify rejected the update.
                 if self.reconcile(api):
                     return
-                raise SpotifyError("Spotify-wijziging is niet doorgevoerd")
+                raise SpotifyError("Spotify change was not applied")
             self.store.resolve(True)
-            log.info("Daily Drive ververst: %s", detail)
+            log.info("Daily Drive refreshed: %s", detail)
         except Exception as exc:
-            log.exception("Daily Drive verversen mislukt")
+            log.exception("Daily Drive refresh failed")
             if history_id is not None:
-                status = "onzeker" if self.store.pending() else "mislukt"
+                status = "uncertain" if self.store.pending() else "failed"
                 self.store.finish(history_id, status, str(exc))
             raise
         finally:

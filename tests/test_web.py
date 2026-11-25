@@ -15,7 +15,10 @@ class WebTests(unittest.TestCase):
 
     def test_ingress_and_csrf_required(self):
         self.assertEqual(self.client.get("/").status_code, 403)
-        self.assertEqual(self.client.get("/", environ_overrides=self.remote).status_code, 200)
+        response = self.client.get("/", environ_overrides=self.remote)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'<html lang="en">', response.data)
+        self.assertIn(b"Connect Spotify", response.data)
         self.assertEqual(self.client.post("/refresh", environ_overrides=self.remote).status_code, 403)
 
     def test_configuration_accepts_urls_and_rejects_target_as_source(self):

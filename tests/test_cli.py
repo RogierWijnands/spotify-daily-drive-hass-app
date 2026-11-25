@@ -40,14 +40,14 @@ class CliTests(unittest.TestCase):
         item = {"uri": "spotify:track:1", "name": "Song", "duration_ms": 180000,
                 "artists": [{"name": "Artist"}]}
         with patch("app.cli.Spotify") as spotify, \
-             patch("app.cli.build_items", return_value=([item], [], "120 minuten")), \
+             patch("app.cli.build_items", return_value=([item], [], "120 minutes")), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             result = cli.main(["--config", str(self.path)])
         self.assertEqual(result, 0)
         spotify.return_value.playlist_items.assert_called_once_with(self.target)
         spotify.return_value.replace.assert_not_called()
         self.assertIn("Artist - Song", output.getvalue())
-        self.assertIn("niet gewijzigd", output.getvalue())
+        self.assertIn("not changed", output.getvalue())
         self.assertEqual(Store(self.db).history(), [])
 
     def test_apply_uses_refresh_and_persists_history(self):
@@ -60,12 +60,12 @@ class CliTests(unittest.TestCase):
                 self.replaced = (pid, items)
         fake = FakeSpotify(None)
         with patch("app.refresh.Spotify", return_value=fake), \
-             patch("app.refresh.build", return_value=(["new"], ["episode"], "120 minuten")):
+             patch("app.refresh.build", return_value=(["new"], ["episode"], "120 minutes")):
             result = cli.main(["--config", str(self.path), "--apply"])
         self.assertEqual(result, 0)
         self.assertEqual(fake.replaced, (self.target, ["new"]))
         store = Store(self.db)
-        self.assertEqual(store.history()[0]["status"], "geslaagd")
+        self.assertEqual(store.history()[0]["status"], "succeeded")
         self.assertEqual(store.used_episodes(), {"episode"})
 
     def test_invalid_config_does_not_open_database(self):
@@ -83,7 +83,7 @@ class CliTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-m", "app.cli", "--pending"],
                                 cwd=self.temp.name, env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Geen onzekere playlistwijziging", result.stdout)
+        self.assertIn("No uncertain playlist change", result.stdout)
 
     def test_account_change_blocked_when_pending(self):
         store = Store(self.db)
@@ -93,7 +93,7 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as output:
             result = cli.main(["--config", str(self.path)])
         self.assertEqual(result, 1)
-        self.assertIn("onzekere", output.getvalue())
+        self.assertIn("uncertain", output.getvalue())
         self.assertIsNotNone(Store(self.db).pending())
 
     def test_pending_requires_confirmation_to_release(self):
@@ -106,14 +106,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("old", output.getvalue())
         self.assertIn("new", output.getvalue())
-        with patch("builtins.input", return_value="nee"), contextlib.redirect_stderr(io.StringIO()):
+        with patch("builtins.input", return_value="no"), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(cli.main(["--config", str(self.path), "--release-pending"]), 1)
         self.assertIsNotNone(Store(self.db).pending())
-        with patch("builtins.input", return_value="BEVESTIG"):
+        with patch("builtins.input", return_value="CONFIRM"):
             self.assertEqual(cli.main(["--config", str(self.path), "--release-pending"]), 0)
         store = Store(self.db)
         self.assertIsNone(store.pending())
-        self.assertEqual(store.history()[0]["status"], "onzeker")
+        self.assertEqual(store.history()[0]["status"], "uncertain")
 
 
 if __name__ == "__main__":

@@ -25,13 +25,22 @@ class Store:
                     episodes TEXT NOT NULL, detail TEXT NOT NULL
                 );
             """)
+            # Migrate status values written by earlier versions without discarding history.
             db.execute("""
-                UPDATE history SET status='mislukt', detail='App gestopt vóór het vervangen'
-                WHERE status='bezig' AND id NOT IN (SELECT history_id FROM pending)
+                UPDATE history SET status = CASE status
+                    WHEN 'bezig' THEN 'in_progress'
+                    WHEN 'geslaagd' THEN 'succeeded'
+                    WHEN 'mislukt' THEN 'failed'
+                    WHEN 'onzeker' THEN 'uncertain'
+                    ELSE status END
             """)
             db.execute("""
-                UPDATE history SET status='onzeker', detail='App gestopt tijdens het vervangen'
-                WHERE status='bezig' AND id IN (SELECT history_id FROM pending)
+                UPDATE history SET status='failed', detail='App stopped before replacing the playlist'
+                WHERE status='in_progress' AND id NOT IN (SELECT history_id FROM pending)
+            """)
+            db.execute("""
+                UPDATE history SET status='uncertain', detail='App stopped during playlist replacement'
+                WHERE status='in_progress' AND id IN (SELECT history_id FROM pending)
             """)
         os.chmod(path, 0o600)
 
@@ -65,7 +74,7 @@ class Store:
         with self.connect() as db:
             try:
                 cursor = db.execute("INSERT INTO history (started,status,detail,scheduled_key) VALUES (?,?,?,?)",
-                                    (now, "bezig", "", scheduled_key))
+                                    (now, "in_progress", "", scheduled_key))
             except sqlite3.IntegrityError:
                 return None
             return cursor.lastrowid
@@ -99,12 +108,12 @@ class Store:
         with self.connect() as db:
             row = db.execute("SELECT * FROM pending WHERE id=1").fetchone()
             if not row:
-                raise RuntimeError("Geen openstaande playlistwijziging")
+                raise RuntimeError("No pending playlist change")
             if success:
                 db.executemany("INSERT OR REPLACE INTO episodes VALUES (?,?)",
                                [(uri, now) for uri in json.loads(row["episodes"])])
             db.execute("UPDATE history SET status=?,detail=? WHERE id=?",
-                       ("geslaagd" if success else "mislukt",
+                       ("succeeded" if success else "failed",
                         detail or row["detail"], row["history_id"]))
             db.execute("DELETE FROM pending WHERE id=1")
 
@@ -112,7 +121,7 @@ class Store:
         with self.connect() as db:
             row = db.execute("SELECT history_id FROM pending WHERE id=1").fetchone()
             if not row:
-                raise ValueError("Er is geen onzekere wijziging")
+                raise ValueError("There is no uncertain change")
             db.execute("UPDATE history SET status=?,detail=? WHERE id=?",
-                       ("onzeker", "Handmatig vrijgegeven; uitkomst niet vastgesteld", row["history_id"]))
+                       ("uncertain", "Manually released; outcome not determined", row["history_id"]))
             db.execute("DELETE FROM pending WHERE id=1")

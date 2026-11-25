@@ -25,7 +25,7 @@ def playlist_id(value):
     elif value.startswith("spotify:playlist:"):
         value = value.removeprefix("spotify:playlist:")
     if len(value) != 22 or not value.isascii() or not value.isalnum():
-        raise ValueError("Ongeldige Spotify-playlist-URL of ID")
+        raise ValueError("Invalid Spotify playlist URL or ID")
     return value
 
 
@@ -45,21 +45,21 @@ def callback_code(url, state):
     parsed = urlparse(url.strip())
     expected = urlparse(REDIRECT_URI)
     if (parsed.scheme, parsed.netloc, parsed.path) != (expected.scheme, expected.netloc, expected.path):
-        raise ValueError("De terugkeer-URL heeft niet het verwachte adres")
+        raise ValueError("The callback URL does not match the expected address")
     params = parse_qs(parsed.query)
     if len(params.get("state", [])) != 1 or not secrets.compare_digest(params["state"][0], state):
-        raise ValueError("Spotify state komt niet overeen; start opnieuw")
+        raise ValueError("Spotify state does not match; start again")
     if params.get("error"):
-        raise ValueError("Spotify-autorisatie geweigerd: " + params["error"][0])
+        raise ValueError("Spotify authorization denied: " + params["error"][0])
     if len(params.get("code", [])) != 1:
-        raise ValueError("Autorisatiecode ontbreekt")
+        raise ValueError("Authorization code is missing")
     return params["code"][0]
 
 
 def token_request(data):
     response = requests.post(TOKEN_URL, data=data, timeout=20)
     if not response.ok:
-        raise SpotifyError(f"Spotify-tokenaanvraag mislukt (HTTP {response.status_code})")
+        raise SpotifyError(f"Spotify token request failed (HTTP {response.status_code})")
     return response.json()
 
 
@@ -69,7 +69,7 @@ class Spotify:
         client_id = store.get("client_id")
         refresh = store.get("refresh_token")
         if not client_id or not refresh:
-            raise SpotifyError("Koppel eerst Spotify in de instellingen")
+            raise SpotifyError("Connect Spotify in the settings first")
         token = token_request({"grant_type": "refresh_token", "refresh_token": refresh, "client_id": client_id})
         if token.get("refresh_token"):
             store.set_many({"refresh_token": token["refresh_token"]})
@@ -80,8 +80,8 @@ class Spotify:
                                     timeout=30, **kwargs)
         if not response.ok:
             if path == "/me/tracks" and response.status_code == 403:
-                raise SpotifyError("Gelikete nummers niet toegankelijk (HTTP 403); koppel Spotify opnieuw en geef toestemming voor je bibliotheek")
-            raise SpotifyError(f"Spotify {method} {path} mislukt (HTTP {response.status_code})")
+                raise SpotifyError("Liked tracks are inaccessible (HTTP 403); reconnect Spotify and grant library access")
+            raise SpotifyError(f"Spotify {method} {path} failed (HTTP {response.status_code})")
         return response.json() if response.content else {}
 
     def get(self, path, **params):
@@ -100,7 +100,7 @@ class Spotify:
                 return result
             offset += len(items)
             if max_items is not None and offset >= max_items:
-                raise SpotifyError(f"Te veel items in {path}; wijziging afgebroken")
+                raise SpotifyError(f"Too many items in {path}; change aborted")
 
     def playlist_items(self, pid):
         entries = self.pages(f"/playlists/{pid}/items", {"additional_types": "track,episode", "market": "NL"})
@@ -108,7 +108,7 @@ class Spotify:
         for entry in entries:
             item = entry.get("item")
             if not item or entry.get("is_local") or not item.get("uri"):
-                raise SpotifyError("Playlist bevat lokale of onleesbare items; veilig vervangen is niet mogelijk")
+                raise SpotifyError("Playlist contains local or unreadable items; safe replacement is not possible")
             result.append(item["uri"])
         return result
 

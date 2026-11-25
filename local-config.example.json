@@ -1,5 +1,5 @@
 {
-  "client_id": "VUL_HIER_JE_SPOTIFY_CLIENT_ID_IN",
-  "playlist": "https://open.spotify.com/playlist/VUL_HIER_JE_PLAYLIST_ID_IN",
+  "client_id": "YOUR_SPOTIFY_CLIENT_ID",
+  "playlist": "https://open.spotify.com/playlist/YOUR_PLAYLIST_ID",
   "source_playlists": []
 }

@@ -25,7 +25,7 @@ oauth = {}
 oauth_lock = threading.Lock()
 
 PAGE = """<!doctype html>
-<html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Daily Drive</title><style>
 body {font: 16px system-ui; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5}
 input, textarea {box-sizing: border-box; width: 100%; padding: .5rem; margin: .25rem 0 1rem}
@@ -35,32 +35,32 @@ td, th {padding: .4rem; text-align: left; border-bottom: 1px solid #bbb}
 </style></head><body>
 <h1>Daily Drive</h1>
 {% if message %}<p class="notice">{{ message }}</p>{% endif %}
-{% if pending %}<p><strong>Let op:</strong> De uitkomst van een eerdere wijziging is onzeker.
-Controleer de playlist. Nieuwe wijzigingen worden geblokkeerd totdat de inhoud automatisch is bevestigd.</p>
+{% if pending %}<p><strong>Warning:</strong> The outcome of a previous change is uncertain.
+Check the playlist. New changes are blocked until the contents can be confirmed automatically.</p>
 <form action="release" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label><input style="width:auto" type="checkbox" name="confirm" required>
-Ik heb de playlist gecontroleerd en begrijp dat de eerdere uitkomst onbekend blijft.</label>
-<button>Blokkade handmatig opheffen</button></form>{% endif %}
-<h2>Instellingen</h2>
+I have checked the playlist and understand that the previous outcome remains unknown.</label>
+<button>Release block manually</button></form>{% endif %}
+<h2>Settings</h2>
 <form action="configure" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
-<label>Spotify client-ID <input name="client_id" required value="{{ client_id }}"></label>
-<label>URL van je Daily Drive-playlist <input name="target" required value="{{ target }}"></label>
-<label>Eigen bronplaylists (één Spotify-URL per regel)
+<label>Spotify client ID <input name="client_id" required value="{{ client_id }}"></label>
+<label>Daily Drive playlist URL <input name="target" required value="{{ target }}"></label>
+<label>Source playlists you own (one Spotify URL per line)
 <textarea name="sources" rows="4">{{ sources }}</textarea></label>
-<button>Instellingen opslaan</button></form>
-<h2>Spotify koppelen</h2>
-<p>Status: {{ 'gekoppeld' if connected else 'niet gekoppeld' }}.
-Registreer eerst <code>{{ redirect_uri }}</code> als redirect-URI in je Spotify-app.</p>
-<form action="authorize" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Koppeling starten</button></form>
+<button>Save settings</button></form>
+<h2>Connect Spotify</h2>
+<p>Status: {{ 'connected' if connected else 'not connected' }}.
+First register <code>{{ redirect_uri }}</code> as a redirect URI in your Spotify app.</p>
+<form action="authorize" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Start connection</button></form>
 {% if auth_url %}
-<p><a href="{{ auth_url }}" target="_blank" rel="noopener noreferrer">Open Spotify en geef toestemming</a>.
-Na toestemming kan een foutpagina verschijnen; kopieer de volledige URL uit de adresbalk en plak die hieronder.</p>
+<p><a href="{{ auth_url }}" target="_blank" rel="noopener noreferrer">Open Spotify and grant access</a>.
+An error page may appear after authorization; copy the full URL from the address bar and paste it below.</p>
 <form action="callback" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
-<label>Terugkeer-URL <input name="callback" required autocomplete="off"></label><button>Koppeling afronden</button></form>
+<label>Callback URL <input name="callback" required autocomplete="off"></label><button>Complete connection</button></form>
 {% endif %}
-<h2>Verversen</h2><p>Automatisch om 09:00, 14:00 en 18:00 (Europe/Amsterdam).</p>
-<form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Nu verversen</button></form>
-<h2>Geschiedenis</h2><table><tr><th>Gestart (UTC)</th><th>Status</th><th>Details</th></tr>
+<h2>Refresh</h2><p>Automatically at 09:00, 14:00 and 18:00 (Europe/Amsterdam).</p>
+<form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh now</button></form>
+<h2>History</h2><table><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr>
 {% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}</td><td>{{ entry.detail }}</td></tr>{% endfor %}
 </table></body></html>"""
 
@@ -102,14 +102,14 @@ def configure():
     try:
         client_id = request.form.get("client_id", "").strip()
         if len(client_id) != 32 or not client_id.isascii() or not client_id.isalnum():
-            raise ValueError("Ongeldige Spotify client-ID")
+            raise ValueError("Invalid Spotify client ID")
         target = playlist_id(request.form.get("target", ""))
         sources = list(dict.fromkeys(playlist_id(line) for line in request.form.get("sources", "").splitlines()
                                      if line.strip()))
         if target in sources:
-            raise ValueError("Daily Drive mag niet ook een bronplaylist zijn")
+            raise ValueError("Daily Drive cannot also be a source playlist")
         if not refresh.lock.acquire(blocking=False):
-            raise ValueError("Wacht tot de huidige verversing klaar is")
+            raise ValueError("Wait for the current refresh to finish")
         try:
             values = {"client_id": client_id, "playlist_id": target, "source_ids": sources}
             if client_id != store.get("client_id"):
@@ -119,7 +119,7 @@ def configure():
             store.set_many(values)
         finally:
             refresh.lock.release()
-        return home("Instellingen opgeslagen.")
+        return home("Settings saved.")
     except ValueError as exc:
         return home(str(exc), 400)
 
@@ -128,7 +128,7 @@ def configure():
 def authorize():
     client_id = store.get("client_id")
     if not client_id:
-        return home("Sla eerst je client-ID op.", 400)
+        return home("Save your client ID first.", 400)
     url, verifier, state = authorization(client_id)
     with oauth_lock:
         oauth.clear()
@@ -141,22 +141,22 @@ def callback():
     try:
         with oauth_lock:
             if not oauth or time.monotonic() - oauth["created"] > 600:
-                raise ValueError("Koppeling verlopen; start opnieuw")
+                raise ValueError("Connection expired; start again")
             if oauth["client_id"] != store.get("client_id"):
-                raise ValueError("Client-ID gewijzigd; start opnieuw")
+                raise ValueError("Client ID changed; start again")
             code = callback_code(request.form.get("callback", ""), oauth["state"])
             data = token_request({"client_id": oauth["client_id"], "grant_type": "authorization_code",
                                   "code": code, "redirect_uri": REDIRECT_URI, "code_verifier": oauth["verifier"]})
             if not data.get("refresh_token"):
-                raise SpotifyError("Spotify gaf geen refresh-token terug")
+                raise SpotifyError("Spotify did not return a refresh token")
             store.set_many({"refresh_token": data["refresh_token"]})
             oauth.clear()
-        return home("Spotify is gekoppeld.")
+        return home("Spotify is connected.")
     except (ValueError, SpotifyError) as exc:
         return home(str(exc), 400)
     except RequestException:
-        log.exception("Spotify-koppeling mislukt")
-        return home("Spotify is niet bereikbaar; probeer de koppeling opnieuw.", 502)
+        log.exception("Spotify connection failed")
+        return home("Spotify is unreachable; try connecting again.", 502)
 
 
 def run_refresh(key=None):
@@ -170,24 +170,24 @@ def run_refresh(key=None):
 @app.post("/refresh")
 def manual_refresh():
     if refresh.lock.locked():
-        return home("Er loopt al een verversing.", 409)
+        return home("A refresh is already running.", 409)
     threading.Thread(target=run_refresh, daemon=True).start()
-    return home("Verversing gestart; vernieuw deze pagina voor de status.")
+    return home("Refresh started; reload this page for the status.")
 
 
 @app.post("/release")
 def release_pending():
     if request.form.get("confirm") != "on":
-        return home("Bevestig eerst dat je de playlist hebt gecontroleerd.", 400)
+        return home("First confirm that you have checked the playlist.", 400)
     if not refresh.lock.acquire(blocking=False):
-        return home("Er loopt al een verversing.", 409)
+        return home("A refresh is already running.", 409)
     try:
         store.release_pending()
     except ValueError as exc:
         return home(str(exc), 400)
     finally:
         refresh.lock.release()
-    return home("Blokkade opgeheven; de eerdere uitkomst blijft onbekend.")
+    return home("Block released; the previous outcome remains unknown.")
 
 
 def scheduler():

@@ -103,7 +103,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(episodes), 6)
         self.assertEqual(len(items), len(set(items)))
         self.assertTrue(set(episodes).issubset(items))
-        self.assertIn("minuten", detail)
+        self.assertIn("minutes", detail)
         self.assertLessEqual(abs((len(items) - 6) * 4 + 42 - 120), 2)
 
     def test_liked_tracks_are_filtered_and_can_fill_the_mix(self):
@@ -166,7 +166,7 @@ class SpotifyTests(unittest.TestCase):
         with patch("app.spotify.requests.request") as request:
             request.return_value.ok = False
             request.return_value.status_code = 403
-            with self.assertRaisesRegex(SpotifyError, "koppel Spotify opnieuw"):
+            with self.assertRaisesRegex(SpotifyError, "reconnect Spotify"):
                 api.get("/me/tracks")
 
 
@@ -186,11 +186,11 @@ class RefreshTests(unittest.TestCase):
                 self.items = items
         api = Fake()
         with patch("app.refresh.Spotify", return_value=api), patch(
-                "app.refresh.build", return_value=(["new"], ["episode"], "120 minuten")):
+                "app.refresh.build", return_value=(["new"], ["episode"], "120 minutes")):
             self.service.run("2026-01-01 09:00")
             self.service.run("2026-01-01 09:00")
         self.assertEqual(api.items, ["new"])
-        self.assertEqual(self.store.history()[0]["status"], "geslaagd")
+        self.assertEqual(self.store.history()[0]["status"], "succeeded")
         self.assertEqual(self.store.used_episodes(), {"episode"})
         self.assertIsNone(self.store.pending())
         self.assertEqual(len(self.store.history()), 1)
@@ -203,20 +203,20 @@ class RefreshTests(unittest.TestCase):
                 self.calls += 1
                 if self.calls == 1:
                     return ["old"]
-                raise SpotifyError("niet bereikbaar")
+                raise SpotifyError("unreachable")
             def replace(self, pid, items):
                 raise TimeoutError("timeout")
         with patch("app.refresh.Spotify", return_value=Fake()), patch(
-                "app.refresh.build", return_value=(["new"], ["episode"], "120 minuten")):
+                "app.refresh.build", return_value=(["new"], ["episode"], "120 minutes")):
             with self.assertRaises(SpotifyError):
                 self.service.run()
-        self.assertEqual(self.store.history()[0]["status"], "onzeker")
+        self.assertEqual(self.store.history()[0]["status"], "uncertain")
         self.assertIsNotNone(self.store.pending())
         class Recovered:
             def playlist_items(self, pid):
                 return ["new"]
         self.assertTrue(self.service.reconcile(Recovered()))
-        self.assertEqual(self.store.history()[0]["status"], "geslaagd")
+        self.assertEqual(self.store.history()[0]["status"], "succeeded")
         self.assertEqual(self.store.used_episodes(), {"episode"})
 
     def test_failed_preparation_does_not_replace(self):
@@ -226,11 +226,11 @@ class RefreshTests(unittest.TestCase):
             def replace(self, pid, items):
                 raise AssertionError("should not write")
         with patch("app.refresh.Spotify", return_value=Fake()), patch(
-                "app.refresh.build", side_effect=SpotifyError("te weinig muziek")):
+                "app.refresh.build", side_effect=SpotifyError("not enough music")):
             with self.assertRaises(SpotifyError):
                 self.service.run()
         self.assertIsNone(self.store.pending())
-        self.assertEqual(self.store.history()[0]["status"], "mislukt")
+        self.assertEqual(self.store.history()[0]["status"], "failed")
 
     def test_conflicting_pending_write_must_be_explicitly_released(self):
         history_id = self.store.start()
@@ -243,14 +243,35 @@ class RefreshTests(unittest.TestCase):
         self.assertIsNotNone(self.store.pending())
         self.store.release_pending()
         self.assertIsNone(self.store.pending())
-        self.assertEqual(self.store.history()[0]["status"], "onzeker")
+        self.assertEqual(self.store.history()[0]["status"], "uncertain")
 
     def test_restart_records_interrupted_attempt(self):
         history_id = self.store.start()
         self.store.prepare(history_id, "target", ["old"], ["new"], ["episode"], "detail")
         restored = Store(self.store.path)
-        self.assertEqual(restored.history()[0]["status"], "onzeker")
+        self.assertEqual(restored.history()[0]["status"], "uncertain")
         self.assertIsNotNone(restored.pending())
+
+    def test_existing_dutch_history_and_pending_change_survive_upgrade(self):
+        self.store.set_many({"refresh_token": "saved-token"})
+        with self.store.connect() as db:
+            for status in ("geslaagd", "mislukt", "onzeker", "bezig", "bezig"):
+                cursor = db.execute("INSERT INTO history (started, status, detail) VALUES (?, ?, ?)",
+                                    ("2026-01-01", status, "original detail"))
+            history_id = cursor.lastrowid
+        self.store.prepare(history_id, "target", ["old"], ["new"], ["episode"], "detail")
+        upgraded = Store(self.store.path)
+        self.assertEqual([entry["status"] for entry in upgraded.history()],
+                         ["uncertain", "failed", "uncertain", "failed", "succeeded"])
+        self.assertEqual(upgraded.history()[-1]["detail"], "original detail")
+        self.assertEqual(upgraded.get("refresh_token"), "saved-token")
+        self.assertEqual(upgraded.pending()["history_id"], history_id)
+        class Fake:
+            def playlist_items(self, pid):
+                return ["new"]
+        self.assertTrue(Refresh(upgraded).reconcile(Fake()))
+        self.assertEqual(upgraded.history()[0]["status"], "succeeded")
+        self.assertEqual(upgraded.used_episodes(), {"episode"})
 
 
 if __name__ == "__main__":

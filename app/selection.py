@@ -4,7 +4,7 @@ from itertools import zip_longest
 
 from .spotify import SpotifyError
 
-NEWS = "2EaVmyxrGQv0au2jjHki5v"  # NU.nl nieuws
+NEWS = "2EaVmyxrGQv0au2jjHki5v"  # NU.nl news
 SHOWS = [
     (NEWS, 4),
     ("1lr6j4z70G5xke70V6nHhI", 1),  # Alledaagse Vragen
@@ -41,7 +41,7 @@ def podcast_candidates(api):
                 break
             offset += len(page["items"])
         if len(current) != count:
-            raise SpotifyError("Niet alle nieuwste afspeelbare podcastafleveringen zijn beschikbaar")
+            raise SpotifyError("Not all latest playable podcast episodes are available")
         (news if show == NEWS else other_podcasts).extend(current)
     return [episode for pair in zip_longest(news, other_podcasts)
             for episode in pair if episode is not None]
@@ -119,12 +119,12 @@ def select_music(groups, podcasts, rng):
     if not chosen and remaining:
         chosen.append(remaining.pop())
     if not chosen:
-        raise SpotifyError("Geen afspeelbare muziek gevonden")
+        raise SpotifyError("No playable music found")
     base = podcast_ms + sum(item["duration_ms"] for item in chosen)
     if podcast_ms >= TARGET - TOLERANCE:
         return chosen
     if base > TARGET + TOLERANCE:
-        raise SpotifyError("Geselecteerde favorieten passen niet binnen de doelduur")
+        raise SpotifyError("Selected favorites do not fit within the target duration")
 
     # Subset sum in seconds: keep exact durations for the final tolerance check.
     capacity = (TARGET + TOLERANCE - base) // 1000
@@ -140,7 +140,7 @@ def select_music(groups, podcasts, rng):
     chosen.extend(remaining[i] for i in best)
     duration = podcast_ms + sum(item["duration_ms"] for item in chosen)
     if abs(duration - TARGET) > TOLERANCE:
-        raise SpotifyError("Onvoldoende geschikte muziek om binnen 118–122 minuten te blijven")
+        raise SpotifyError("Not enough suitable music to stay within 118-122 minutes")
     return chosen
 
 
@@ -167,7 +167,7 @@ def build_items(api, playlist_ids, rng=None):
     result = interleave(music, podcasts, rng)
     total = sum(item["duration_ms"] for item in result)
     podcast_total = sum(item["duration_ms"] for item in podcasts)
-    detail = f"{total / 60000:.1f} minuten; podcasts {podcast_total / total * 100:.1f}%"
+    detail = f"{total / 60000:.1f} minutes; podcasts {podcast_total / total * 100:.1f}%"
     return result, [item["uri"] for item in podcasts], detail
 
 
