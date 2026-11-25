@@ -10,6 +10,7 @@ class Store:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path
         with self.connect() as db:
+            # Keep configuration, library caches, refresh history and pending writes separate.
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS history (
@@ -44,6 +45,7 @@ class Store:
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
         try:
+            # Commit successful operations and roll back if an exception occurs.
             with db:
                 yield db
         finally:
@@ -55,15 +57,18 @@ class Store:
         return json.loads(row["value"]) if row else default
 
     def set_many(self, values, *, clear_cache=False):
+        # Credential changes and cache invalidation share one transaction.
         with self.connect() as db:
             if clear_cache:
                 db.execute("DELETE FROM daily_cache")
+                db.execute("DELETE FROM settings WHERE key='followed_artists_cache'")
             db.executemany(
                 "INSERT OR REPLACE INTO settings VALUES (?, ?)",
                 [(k, json.dumps(v)) for k, v in values.items()],
             )
 
     def get_cached(self, key, day):
+        # Expired days are removed lazily when the cache is next accessed.
         with self.connect() as db:
             db.execute("DELETE FROM daily_cache WHERE day != ?", (day,))
             row = db.execute("SELECT value FROM daily_cache WHERE key=?", (key,)).fetchone()
@@ -77,6 +82,7 @@ class Store:
             )
 
     def history(self):
+        # The web UI shows the latest 20 entries; older entries remain in SQLite.
         with self.connect() as db:
             return [dict(row) for row in db.execute(
                 "SELECT started, status, detail FROM history ORDER BY id DESC LIMIT 20")]
@@ -84,6 +90,7 @@ class Store:
     def start(self, scheduled_key=None):
         now = datetime.now(timezone.utc).isoformat()
 
+        # A manual refresh has no scheduled key; scheduled refreshes use a unique key.
         with self.connect() as db:
             try:
                 cursor = db.execute(
@@ -115,6 +122,7 @@ class Store:
         return result
 
     def prepare(self, history_id, playlist_id, before, after, episodes, detail):
+        # Save both playlist versions before sending the replacement to Spotify.
         with self.connect() as db:
             db.execute(
                 "INSERT INTO pending VALUES (1,?,?,?,?,?,?)",
@@ -144,6 +152,7 @@ class Store:
             db.execute("DELETE FROM pending WHERE id=1")
 
     def release_pending(self):
+        # Manual release does not claim that the Spotify write succeeded or failed.
         with self.connect() as db:
             row = db.execute("SELECT history_id FROM pending WHERE id=1").fetchone()
             if not row:

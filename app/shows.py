@@ -6,6 +6,7 @@ def validate_shows(news, podcasts):
     seen = set()
     total = 0
 
+    # A show may appear only once across both categories.
     for group in (news, podcasts):
         if not isinstance(group, list):
             raise ValueError("News and podcast shows must be lists")
@@ -15,6 +16,7 @@ def validate_shows(news, podcasts):
             if not isinstance(entry, dict) or not isinstance(entry.get("show"), str):
                 raise ValueError("Each show must have a Spotify show URL or ID and an episode count")
 
+            # Reject booleans as well as non-integer or non-positive counts.
             count = entry.get("count")
             if type(count) is not int or count < 1:
                 raise ValueError("Each show must have a positive whole-number episode count")
@@ -35,6 +37,8 @@ def validate_shows(news, podcasts):
 
 def parse_show_lines(text):
     entries = []
+
+    # Each non-empty line has a show URL or ID, then a comma and episode count.
     for line in text.splitlines():
         if not line.strip():
             continue

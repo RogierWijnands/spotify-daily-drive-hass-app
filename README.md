@@ -41,12 +41,13 @@ https://open.spotify.com/show/3Ab6DGFJL7VE5ToIH4r6w1, 1
 - **Episodes:** the latest playable episodes take priority. News and podcasts are mixed with music where possible. No duplicates within a playlist; previously used episodes can recur while still latest.
 - **Music:** top, recent and liked tracks; releases by favorite artists and their collaborators; optional source playlists. Discoveries are not Spotify recommendations and individual sources are not guaranteed in every refresh.
 - **History:** Spotify's longest top-artist and top-track ranges cover approximately one year, not all time.
-- **Artists:** up to 50 top artists from a randomly chosen short-, medium- or long-term range are combined with followed artists, deduplicated and shuffled. Up to eight are selected for release discovery per refresh.
-- **Cache:** liked tracks and followed artists are fetched once per `Europe/Amsterdam` calendar day and stored in SQLite. Expired entries are removed when next accessed; the data is fetched again on the first refresh of a new day, after reconnecting Spotify, or after changing the client ID. A failed fetch fails the refresh; stale data is not used.
-- **Collaborators:** up to four are selected randomly; up to two albums or singles each are searched, favoring recent releases.
+- **Artists:** up to 50 top artists from a randomly chosen short-, medium- or long-term range are combined with followed artists and artists from top, recent and cached liked tracks, deduplicated and shuffled. Up to eight are selected for release discovery per refresh.
+- **Cache:** up to five randomly selected pages of liked tracks (50 tracks per page) are stored daily. Followed artists are stored persistently: up to five page requests are made per `Europe/Amsterdam` day, continuing from the previous cursor. After the last page, a new scan starts on a later day; unfollowed artists are removed when that scan completes. Changes may take time to appear during a multi-day scan.
+- **Releases:** up to two releases per selected artist are chosen randomly from the available catalog. Up to four collaborators are selected randomly and searched in the same way. Spotify may require additional requests for releases beyond the first page.
+- **Source errors:** unavailable episodes, tracks, artists, releases and source playlists are logged and skipped. Successfully fetched pages can still be used; incomplete liked-track results are not cached. Followed-artist scan progress and previously cached artists remain available.
 - **Source playlists:** new Spotify apps can read only playlists you own or collaborate on. Copy Discover Weekly or Release Radar into your own playlists to use them; the copies do not update automatically.
-- **Duration:** target 90 minutes ±2 minutes and 70/30 music/podcasts. Episodes take priority, so duration and ratio can differ.
-- **Preparation failures:** insufficient playable music or episodes, inaccessible sources, local or unreadable playlist items, API restrictions and rate limits can cause a refresh to fail without replacing the playlist. Check the app log.
+- **Duration:** 90 minutes ±2 minutes; the music/podcast ratio depends on the available content. A playlist may contain only podcasts if they already meet the duration.
+- **Preparation failures:** insufficient playable content, inaccessible target playlists, local or unreadable target items, authentication or storage errors can fail the refresh without replacing the playlist. Check the app log.
 - **Rate limits:** failed refresh history includes Spotify's `Retry-After` value when provided. The app does not automatically retry.
 
 ## Playlist safety

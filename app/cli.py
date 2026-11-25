@@ -31,6 +31,7 @@ def read_config(path):
     if not isinstance(target, str) or not isinstance(sources, list) or not all(isinstance(s, str) for s in sources):
         raise ValueError("playlist must be a URL or ID and source_playlists a list of URLs or IDs")
 
+    # Normalize URLs to IDs and remove duplicate source playlists.
     target_id = playlist_id(target)
     source_ids = list(dict.fromkeys(playlist_id(source) for source in sources))
     if target_id in source_ids:
@@ -40,6 +41,7 @@ def read_config(path):
 
 
 def connect_spotify(store, client_id):
+    # The callback is entered privately because it contains an authorization code.
     url, verifier, state = authorization(client_id)
     print("Open this link and grant access:\n" + url)
     print("Then copy the full URL from the address bar, even if an error page appears.")
@@ -94,9 +96,12 @@ def main(argv=None):
         config_path = args.config.expanduser().resolve()
         client_id, target, sources, news, podcasts = read_config(config_path)
         store = Store(str(config_path.parent / ".daily-drive.sqlite3"))
+
+        # A pending playlist write must be reconciled with the original account.
         if client_id != store.get("client_id") and store.pending():
             raise SpotifyError("An uncertain playlist change is still pending; use the original client ID first")
 
+        # A new client ID requires a fresh Spotify connection and library cache.
         values = {
             "client_id": client_id, "playlist_id": target, "source_ids": sources,
             "news_shows": news, "podcast_shows": podcasts,
@@ -106,6 +111,7 @@ def main(argv=None):
             values["refresh_token"] = None
         store.set_many(values, clear_cache=client_changed)
 
+        # Preview is the default; only --apply writes to Spotify.
         if args.authorize:
             connect_spotify(store, client_id)
         elif args.pending:

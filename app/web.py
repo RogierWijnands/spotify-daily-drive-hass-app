@@ -19,11 +19,15 @@ from .store import Store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+
 store = Store(os.environ.get("DAILY_DRIVE_DB", "/data/daily_drive.sqlite3"))
 refresh = Refresh(store)
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024
 csrf = secrets.token_urlsafe(32)
+
+# OAuth state is transient; refresh.lock protects account changes during a refresh.
 oauth = {}
 oauth_lock = threading.Lock()
 REFRESH_TIMES = ("00:00", "04:00", "08:00", "12:00", "16:00", "20:00")
@@ -76,7 +80,7 @@ An error page may appear after authorization; copy the full URL from the address
 
 @app.before_request
 def ingress_only():
-    # Home Assistant's ingress proxy is the only supported entry point.
+    # Only accept Home Assistant ingress requests; POST forms also need the CSRF token.
     if request.remote_addr != "172.30.32.2":
         abort(403)
     if request.method == "POST" and not secrets.compare_digest(request.form.get("csrf", ""), csrf):
@@ -134,6 +138,7 @@ def configure():
         if target in sources:
             raise ValueError("Daily Drive cannot also be a source playlist")
 
+        # Validate all settings before saving any of them.
         news, podcasts = validate_shows(
             parse_show_lines(request.form.get("news_shows", "")),
             parse_show_lines(request.form.get("podcast_shows", "")),
@@ -166,6 +171,7 @@ def authorize():
     if not client_id:
         return home("Save your client ID first.", 400)
 
+    # Keep the PKCE verifier and state only in memory until the callback arrives.
     url, verifier, state = authorization(client_id)
     with oauth_lock:
         oauth.clear()
@@ -175,6 +181,7 @@ def authorize():
 
 @app.post("/callback")
 def callback():
+    # Keep the same lock order as configure: refresh lock before OAuth lock.
     if not refresh.lock.acquire(blocking=False):
         return home("Wait for the current refresh to finish before connecting Spotify.", 409)
 
@@ -242,11 +249,11 @@ def release_pending():
 def scheduler():
     tz = ZoneInfo("Europe/Amsterdam")
 
+    # Check local time regularly; the stored key prevents duplicate scheduled runs.
     while True:
         now = datetime.now(tz)
         clock = now.strftime("%H:%M")
         if clock in REFRESH_TIMES:
-            # The stored key prevents duplicate runs during the same minute.
             run_refresh(now.strftime("%Y-%m-%d") + " " + clock)
         time.sleep(15)
 

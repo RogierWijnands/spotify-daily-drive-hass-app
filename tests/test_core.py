@@ -5,12 +5,17 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
+
+from requests import RequestException
 
 from app.refresh import Refresh
 from app.selection import (
-    build, build_items, interleave, music_candidates, select_music, podcast_candidates,
+    build, build_items, interleave, music_candidates, select_music, podcast_candidates, get_api_items,
 )
-from app.spotify import Spotify, SpotifyError, authorization, callback_code, playlist_id, show_id, token_request
+from app.spotify import (
+    Spotify, SpotifyError, SpotifyRateLimitError, authorization, callback_code, playlist_id, show_id, token_request,
+)
 from app.store import Store
 
 NEWS = "news"
@@ -24,8 +29,12 @@ def track(number, minutes=4):
 
 
 class UncachedSpotify:
+    # Selection fakes bypass SQLite; cache behavior is tested with the real Store.
     def daily_cached(self, key, fetch):
         return fetch()
+
+    def liked_tracks(self, rng):
+        return self.pages("/me/tracks", {"market": "NL"}, max_items=None)
 
 
 class SelectionTests(unittest.TestCase):
@@ -47,10 +56,14 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(SpotifyError, "88-92 minutes"):
             select_music([[track(1)], [], [], []], [], random.Random(1))
 
-    def test_long_podcasts_are_kept_with_music(self):
+    def test_long_podcasts_do_not_exceed_duration_limit(self):
         podcasts = [{"uri": "spotify:episode:1", "duration_ms": 91 * 60000}]
-        music = select_music([[track(1)], [], [], []], podcasts, random.Random(1))
-        self.assertEqual(len(music), 1)
+        self.assertEqual(select_music([[track(1)], [], [], []], podcasts, random.Random(1)), [])
+
+    def test_duration_selection_can_skip_long_reserved_track(self):
+        podcasts = [{"uri": "spotify:episode:1", "duration_ms": 89 * 60000}]
+        music = select_music([[track(1, 4)], [], [track(2, 1)]], podcasts, random.Random(1))
+        self.assertEqual(music, [track(2, 1)])
 
     def test_duration_accepts_both_tolerance_boundaries(self):
         for podcast_minutes, total_minutes in ((84, 88), (88, 92)):
@@ -73,6 +86,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len({x["uri"] for x in episodes}), 6)
         self.assertTrue(all(not x["uri"].endswith(":0") for x in episodes))
 
+        # Check both the episode order and the spacing between episodes.
         result = interleave([track(i) for i in range(12)], episodes, random.Random(1))
         positions = [i for i, item in enumerate(result) if item in episodes]
         self.assertTrue(all(b - a > 1 for a, b in zip(positions, positions[1:])))
@@ -109,12 +123,95 @@ class SelectionTests(unittest.TestCase):
         self.assertLessEqual(abs(sum(item["duration_ms"] for item in items) - 90 * 60000), 2 * 60000)
         self.assertIn("podcasts 0.0%", detail)
 
-    def test_unavailable_configured_episodes_fail(self):
+    def test_unavailable_configured_episodes_are_logged_and_skipped(self):
         class Fake:
             def get(self, path, **params):
                 return {"items": [], "next": None}
-        with self.assertRaisesRegex(SpotifyError, "Not enough playable episodes"):
-            podcast_candidates(Fake(), NEWS_SHOWS, [])
+        with self.assertLogs("app.selection", level="WARNING") as logs:
+            self.assertEqual(podcast_candidates(Fake(), NEWS_SHOWS, []), [])
+        self.assertIn("news", "\n".join(logs.output))
+
+    def test_podcast_failure_keeps_available_episodes_and_continues_other_shows(self):
+        class Fake:
+            def get(self, path, **params):
+                if path == "/shows/first/episodes" and params["offset"]:
+                    raise RequestException("page unavailable")
+                show = path.split("/")[2]
+                return {"items": [{"type": "episode", "uri": f"episode:{show}",
+                                   "duration_ms": 60000, "is_playable": True}],
+                        "next": "next" if show == "first" else None}
+
+        with self.assertLogs("app.selection", level="WARNING") as logs:
+            result = podcast_candidates(Fake(), [{"show": "first", "count": 2}],
+                                        [{"show": "second", "count": 1}])
+        self.assertEqual([item["uri"] for item in result], ["episode:first", "episode:second"])
+        self.assertIn("page unavailable", "\n".join(logs.output))
+
+    def test_failed_music_sources_leave_other_sources_available(self):
+        class Fake(UncachedSpotify):
+            def get(self, path, **params):
+                if path == "/me/top/tracks" and params["time_range"] == "short_term":
+                    return {"items": [{"type": "track", "id": "unavailable"}]}
+                if path == "/tracks/unavailable":
+                    raise SpotifyError("track inaccessible")
+                if path == "/me/top/tracks":
+                    raise SpotifyRateLimitError("Retry-After: '45'")
+                if path == "/me/player/recently-played":
+                    raise RequestException("recent inaccessible")
+                if path == "/me/top/artists":
+                    raise SpotifyError("artists inaccessible")
+                if path == "/shows/bad/episodes":
+                    raise SpotifyError("show inaccessible")
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                if path == "/me/tracks":
+                    raise SpotifyError("likes inaccessible")
+                if path == "/playlists/bad/items":
+                    raise SpotifyError("playlist inaccessible")
+                return [{"item": {"id": str(i), "type": "track", "uri": f"spotify:track:{i}",
+                                   "duration_ms": 240000, "is_playable": True}} for i in range(25)]
+
+            def followed_artists(self):
+                raise SpotifyError("followed inaccessible")
+
+        with self.assertLogs("app.selection", level="WARNING") as logs:
+            items, _, _ = build_items(Fake(), ["bad", "good"], [{"show": "bad", "count": 1}],
+                                      [], random.Random(1))
+        self.assertLessEqual(abs(sum(item["duration_ms"] for item in items) - 90 * 60000), 2 * 60000)
+        messages = "\n".join(logs.output)
+        for expected in ("Retry-After: '45'", "recent inaccessible", "likes inaccessible",
+                         "artists inaccessible", "followed inaccessible", "track inaccessible",
+                         "playlist inaccessible", "show inaccessible"):
+            self.assertIn(expected, messages)
+
+    def test_unavailable_candidates_do_not_hide_later_playable_tracks(self):
+        class Fake(UncachedSpotify):
+            def get(self, path, **params):
+                if path.startswith("/tracks/"):
+                    raise SpotifyError("track inaccessible")
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                if path == "/me/tracks":
+                    return []
+                return [
+                    {"item": {"id": f"bad{i}", "type": "track"}} for i in range(80)
+                ] + [
+                    {"item": {"id": str(i), "type": "track", "uri": f"spotify:track:{i}",
+                              "duration_ms": 240000, "is_playable": True}} for i in range(25)
+                ]
+
+            def followed_artists(self):
+                return []
+
+        class NoShuffle(random.Random):
+            def shuffle(self, items):
+                pass
+
+        with self.assertLogs("app.selection", level="WARNING"):
+            items, _, _ = build_items(Fake(), ["source"], [], [], NoShuffle(1))
+        self.assertLessEqual(abs(sum(item["duration_ms"] for item in items) - 90 * 60000), 2 * 60000)
 
     def test_selects_configured_show_counts_and_interleaves_categories(self):
         class Fake:
@@ -129,10 +226,10 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual([item["uri"] for item in episodes],
                          ["first:0", "other:0", "second:0", "other:1", "second:1"])
 
-    def test_episode_count_leaves_room_for_one_music_track(self):
+    def test_episode_duration_over_limit_fails(self):
         podcasts = [{"uri": f"spotify:episode:{i}", "duration_ms": 60000} for i in range(99)]
-        music = select_music([[track(1)], [track(2)]], podcasts, random.Random(1))
-        self.assertEqual(len(music), 1)
+        with self.assertRaises(SpotifyError):
+            select_music([[track(1)], [track(2)]], podcasts, random.Random(1))
 
     def test_build_uses_six_episodes_and_all_music_sources(self):
         def song(number):
@@ -154,7 +251,7 @@ class SelectionTests(unittest.TestCase):
                 if path == "/me/top/artists":
                     return {"items": [{"id": "artist"}]}
                 if path == "/artists/artist/albums":
-                    return {"items": [{"id": "album", "release_date": "2026-01-01"}]}
+                    return {"items": [{"id": "album", "release_date": "2026-01-01"}], "total": 1}
                 if path == "/albums/album/tracks":
                     return {"items": [song(i) for i in range(20, 45)]}
                 raise AssertionError(path)
@@ -220,7 +317,7 @@ class SelectionTests(unittest.TestCase):
                 if path.startswith("/artists/"):
                     artist = path.split("/")[2]
                     self.requested_artists.append((artist, params["include_groups"]))
-                    return {"items": [{"id": artist, "release_date": "2026-01-01"}]}
+                    return {"items": [{"id": artist, "release_date": "2026-01-01"}], "total": 1}
                 if path == "/albums/favorite/tracks":
                     return {"items": [song("duet", ["favorite", "collaborator", "other-favorite"]),
                                       song("duet-again", ["favorite", "collaborator"]),
@@ -264,13 +361,13 @@ class SelectionTests(unittest.TestCase):
                 if path == "/me/top/artists":
                     return {"items": [{"id": "favorite"}]}
                 if path == "/artists/favorite/albums":
-                    return {"items": [{"id": "favorite-album"}]}
+                    return {"items": [{"id": "favorite-album"}], "total": 1}
                 if path == "/albums/favorite-album/tracks":
                     return {"items": [{"artists": [{"id": "favorite"}, {"id": f"collab-{i}"}]}
                                       for i in range(10)]}
                 if path.startswith("/artists/"):
                     self.collaborators.append(path.split("/")[2])
-                    return {"items": []}
+                    return {"items": [], "total": 0}
                 return {"items": []}
 
             def pages(self, path, params, max_items=1000):
@@ -284,6 +381,131 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(api.collaborators), 4)
         self.assertEqual(len(set(api.collaborators)), 4)
 
+    def test_artist_release_selection_includes_catalog_beyond_first_page(self):
+        class Fake(UncachedSpotify):
+            def __init__(self):
+                self.release_requests = []
+                self.selected_albums = []
+
+            def get(self, path, **params):
+                if path == "/me/top/artists":
+                    return {"items": [{"id": "artist"}]}
+                if path == "/artists/artist/albums":
+                    self.release_requests.append(params)
+                    offset = params.get("offset", 0)
+                    albums = [{"id": str(i), "release_date": "2026-01-01" if i < 10 else "1990-01-01"}
+                              for i in range(offset, min(offset + params["limit"], 20))]
+                    return {"items": albums, "total": 20}
+                if path.startswith("/albums/"):
+                    self.selected_albums.append(path.split("/")[2])
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                return []
+
+            def followed_artists(self):
+                return []
+
+        class FixedRandom(random.Random):
+            def sample(self, population, k):
+                if len(population) == 20 and k == 2:
+                    return [12, 2]
+                return super().sample(population, k)
+
+        api = Fake()
+        music_candidates(api, [], FixedRandom(1))
+        self.assertEqual(api.selected_albums, ["12", "2"])
+        self.assertEqual(api.release_requests, [
+            {"market": "NL", "include_groups": "album,single,appears_on", "limit": 10},
+            {"market": "NL", "include_groups": "album,single,appears_on", "limit": 1, "offset": 12},
+        ])
+
+    def test_artist_and_release_errors_do_not_block_other_music(self):
+        class Fake(UncachedSpotify):
+            def get(self, path, **params):
+                if path == "/me/top/artists":
+                    return {"items": [{"id": "good"}, {"id": "bad"}]}
+                if path == "/artists/bad/albums":
+                    raise SpotifyRateLimitError("Retry-After: '45'")
+                if path == "/artists/collaborator/albums":
+                    raise RequestException("connection failed")
+                if path == "/artists/good/albums":
+                    return {"total": 2, "items": [{"id": "good"}, {"id": "bad"}]}
+                if path == "/albums/bad/tracks":
+                    raise SpotifyError("release unavailable")
+                if path == "/albums/good/tracks":
+                    return {"items": [
+                        {"id": str(i), "type": "track", "uri": f"spotify:track:{i}",
+                         "duration_ms": 240000, "is_playable": True,
+                         "artists": [{"id": "good"}, {"id": "collaborator"}]}
+                        for i in range(25)
+                    ] + [{"id": "unavailable", "type": "track", "artists": [{"id": "good"}]}]}
+                if path == "/tracks/unavailable":
+                    raise SpotifyError("track unavailable")
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                return []
+
+            def followed_artists(self):
+                return []
+
+        with self.assertLogs("app.selection", level="WARNING") as logs:
+            items, _, _ = build_items(Fake(), [], [], [], random.Random(1))
+        self.assertGreaterEqual(sum(item["duration_ms"] for item in items), 88 * 60000)
+        self.assertLessEqual(sum(item["duration_ms"] for item in items), 92 * 60000)
+        messages = "\n".join(logs.output)
+        for expected in ("bad", "Retry-After: '45'", "release unavailable", "collaborator",
+                         "connection failed", "track unavailable"):
+            self.assertIn(expected, messages)
+
+    def test_artist_failures_still_fail_when_no_music_can_be_selected(self):
+        class Fake(UncachedSpotify):
+            def get(self, path, **params):
+                if path == "/me/top/artists":
+                    return {"items": [{"id": "bad"}]}
+                if path == "/artists/bad/albums":
+                    raise SpotifyError("artist unavailable")
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                return []
+
+            def followed_artists(self):
+                return []
+
+        with self.assertLogs("app.selection", level="WARNING"):
+            with self.assertRaisesRegex(SpotifyError, "No playable music found"):
+                build_items(Fake(), [], [], [], random.Random(1))
+
+    def test_artist_failures_still_fail_when_music_is_under_duration(self):
+        class Fake(UncachedSpotify):
+            def get(self, path, **params):
+                if path == "/me/top/tracks":
+                    if params["time_range"] == "short_term":
+                        return {"items": [
+                            {"id": str(i), "type": "track", "uri": f"spotify:track:{i}",
+                             "duration_ms": 240000, "is_playable": True}
+                            for i in range(20)
+                        ]}
+                    return {"items": []}
+                if path == "/me/top/artists":
+                    return {"items": [{"id": "bad"}]}
+                if path == "/artists/bad/albums":
+                    return {"total": 2, "items": []}
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                return []
+
+            def followed_artists(self):
+                return []
+
+        with self.assertLogs("app.selection", level="WARNING") as logs:
+            with self.assertRaisesRegex(SpotifyError, "88-92 minutes"):
+                build_items(Fake(), [], [], [], random.Random(1))
+        self.assertIn("inconsistent artist release count", "\n".join(logs.output))
+
     def test_artist_range_is_chosen_per_refresh_and_limited_to_one_page(self):
         class Fake(UncachedSpotify):
             def __init__(self):
@@ -296,6 +518,7 @@ class SelectionTests(unittest.TestCase):
                     return {"items": [{"id": str(i)} for i in range(50)], "next": "next"}
                 if path.startswith("/artists/"):
                     self.selected.append(int(path.split("/")[2]))
+                    return {"items": [], "total": 0}
                 return {"items": [], "next": None}
 
             def pages(self, path, params, max_items=1000):
@@ -335,7 +558,7 @@ class SelectionTests(unittest.TestCase):
                 if path.startswith("/artists/"):
                     artist = path.split("/")[2]
                     self.selected.append(artist)
-                    return {"items": [{"id": artist}]}
+                    return {"items": [{"id": artist}], "total": 1}
                 if path == "/albums/followed/tracks":
                     return {"items": [{"id": "song", "type": "track", "uri": "spotify:track:song",
                                        "is_playable": True, "duration_ms": 180000}]}
@@ -352,7 +575,46 @@ class SelectionTests(unittest.TestCase):
         self.assertCountEqual(api.selected, ["both", "followed"])
         self.assertEqual([item["id"] for item in groups[2]], ["song"])
 
-    def test_music_selection_reuses_saved_tracks_and_followed_artists(self):
+    def test_artists_from_all_track_sources_join_the_deduplicated_pool(self):
+        class Fake(UncachedSpotify):
+            def __init__(self):
+                self.selected = []
+
+            def get(self, path, **params):
+                if path == "/me/top/artists":
+                    return {"items": [{"id": "top"}]}
+                if path == "/me/top/tracks":
+                    term = params["time_range"]
+                    return {"items": [{"id": "same" if term in ("short_term", "long_term") else "medium",
+                                       "artists": [{"id": term}]}]}
+                if path == "/me/player/recently-played":
+                    return {"items": [{"track": {"id": "recent", "artists": [{"id": "recent"}]}}]}
+                if path.startswith("/artists/"):
+                    artist = path.split("/")[2]
+                    self.selected.append(artist)
+                    return {"items": [{"id": artist}], "total": 1}
+                if path == "/albums/liked/tracks":
+                    return {"items": [{"id": "discovery", "type": "track", "uri": "spotify:track:discovery",
+                                       "is_playable": True, "duration_ms": 180000}]}
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                return ([{"track": {"artists": []}} for _ in range(81)] +
+                        [{"track": {"artists": [{"id": "liked"}, {"id": "duet"}, {"id": "followed"},
+                                                {"id": "top"}, {"id": "liked"}, {}]}},
+                         {"track": None}, {"track": {"artists": None}}])
+
+            def followed_artists(self):
+                return [{"id": "followed"}]
+
+        api = Fake()
+        groups = music_candidates(api, [], random.Random(1))
+        self.assertCountEqual(api.selected, [
+            "top", "followed", "liked", "duet", "short_term", "medium_term", "long_term", "recent",
+        ])
+        self.assertEqual([item["id"] for item in groups[2]], ["discovery"])
+
+    def test_music_selection_reuses_liked_tracks_and_followed_artists(self):
         with tempfile.TemporaryDirectory() as directory:
             class Fake(Spotify):
                 def __init__(self):
@@ -365,9 +627,11 @@ class SelectionTests(unittest.TestCase):
                         return {"items": [{"track": {
                             "id": "liked", "type": "track", "uri": "spotify:track:liked",
                             "is_playable": True, "duration_ms": 180000,
-                        }}], "next": None}
+                        }}], "next": None, "total": 1}
                     if path == "/me/following":
                         return {"artists": {"items": [{"id": "followed"}], "next": None}}
+                    if path.startswith("/artists/"):
+                        return {"items": [], "total": 0}
                     return {"items": []}
 
             api = Fake()
@@ -377,6 +641,13 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(api.calls.count("/me/tracks"), 1)
             self.assertEqual(api.calls.count("/me/following"), 1)
             self.assertEqual(api.calls.count("/artists/followed/albums"), 2)
+
+            api.store.set_cached("liked_tracks_cache", datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat(),
+                                 [{"track": {"id": "old", "type": "track", "uri": "spotify:track:old",
+                                             "is_playable": True, "duration_ms": 180000}}])
+            groups = music_candidates(api, [], random.Random(3))
+            self.assertEqual([item["id"] for item in groups[4]], ["old"])
+            self.assertEqual(api.calls.count("/me/tracks"), 1)
 
 
 class SpotifyTests(unittest.TestCase):
@@ -405,7 +676,7 @@ class SpotifyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             callback_code("http://127.0.0.1:8888/callback?code=abc&state=wrong", state)
 
-    def test_saved_tracks_pagination_accepts_more_than_1000(self):
+    def test_liked_tracks_pagination_accepts_more_than_1000(self):
         api = Spotify.__new__(Spotify)
 
         def get(path, **params):
@@ -418,7 +689,117 @@ class SpotifyTests(unittest.TestCase):
         with self.assertRaises(SpotifyError):
             api.pages("/me/tracks")
 
-    def test_daily_library_cache_survives_restart_and_expires_at_amsterdam_midnight(self):
+    def test_liked_track_sample_selects_up_to_five_distinct_random_pages(self):
+        for total in (0, 1, 50, 51, 251, 1000):
+            with self.subTest(total=total):
+                api = Spotify.__new__(Spotify)
+                requests_seen = []
+
+                def get(path, **params):
+                    requests_seen.append((path, params))
+                    start = params["offset"]
+                    return {"total": total, "items": list(range(start, min(start + params["limit"], total)))}
+
+                api.get = get
+                result = api.liked_tracks(random.Random(11))
+                self.assertEqual(requests_seen[0], ("/me/tracks", {"market": "NL", "limit": 1, "offset": 0}))
+                if total <= 1:
+                    self.assertEqual(result, list(range(total)))
+                    self.assertEqual(len(requests_seen), 1)
+                    continue
+                page_count = (total + 49) // 50
+                expected_pages = random.Random(11).sample(range(page_count), min(5, page_count))
+                self.assertEqual([params["offset"] for _, params in requests_seen[1:]],
+                                 [page * 50 for page in expected_pages])
+                self.assertTrue(all(path == "/me/tracks" and params["market"] == "NL" and params["limit"] == 50
+                                    for path, params in requests_seen[1:]))
+                self.assertEqual(result, [item for page in expected_pages
+                                          for item in range(page * 50, min((page + 1) * 50, total))])
+                self.assertLessEqual(len(result), 250)
+                self.assertLessEqual(len(requests_seen), 6)
+
+    def test_sample_is_cached_for_the_day_and_refreshed_the_next_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = Spotify.__new__(Spotify)
+            api.store = Store(os.path.join(directory, "cache.sqlite"))
+            api.get = Mock(side_effect=lambda path, **params: {
+                "total": 1000,
+                "items": list(range(params["offset"], params["offset"] + params["limit"])),
+            })
+            with patch("app.spotify.datetime") as clock:
+                clock.now.return_value = datetime(2026, 1, 15, tzinfo=timezone.utc)
+                first = api.daily_cached("liked_tracks_cache",
+                                         lambda: api.liked_tracks(random.Random(1)))
+                same_day = api.daily_cached("liked_tracks_cache",
+                                            lambda: api.liked_tracks(random.Random(2)))
+                self.assertEqual(first, same_day)
+                self.assertEqual(api.get.call_count, 6)
+
+                clock.now.return_value = datetime(2026, 1, 16, tzinfo=timezone.utc)
+                next_day = api.daily_cached("liked_tracks_cache",
+                                            lambda: api.liked_tracks(random.Random(2)))
+                self.assertNotEqual(first, next_day)
+                self.assertEqual(api.get.call_count, 12)
+
+    def test_failed_sample_does_not_cache_partial_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = Spotify.__new__(Spotify)
+            api.store = Store(os.path.join(directory, "cache.sqlite"))
+            api.get = Mock(side_effect=[
+                {"total": 1000, "items": [0]},
+                {"items": list(range(50))},
+                SpotifyError("unavailable"),
+            ])
+            with patch("app.spotify.datetime") as clock:
+                clock.now.return_value = datetime(2026, 1, 15, tzinfo=timezone.utc)
+                with self.assertRaisesRegex(SpotifyError, "unavailable"):
+                    api.daily_cached("liked_tracks_cache",
+                                     lambda: api.liked_tracks(random.Random(1)))
+            self.assertIsNone(api.store.get_cached("liked_tracks_cache", "2026-01-15"))
+
+    def test_inconsistent_liked_track_response_fails(self):
+        api = Spotify.__new__(Spotify)
+        api.get = Mock(return_value={"total": 1, "items": []})
+        with self.assertRaisesRegex(SpotifyError, "inconsistent"):
+            api.liked_tracks(random.Random(1))
+        api.get = Mock(side_effect=[{"total": 100, "items": [0]}, {"items": []}])
+        with self.assertRaisesRegex(SpotifyError, "sampled liked-track page"):
+            api.liked_tracks(random.Random(1))
+
+    def test_partial_sources_are_used_without_caching_and_target_reads_remain_strict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = Spotify.__new__(Spotify)
+            api.store = Store(os.path.join(directory, "cache.sqlite"))
+            day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+            partial = [{"track": {"id": "first"}}]
+            cases = (
+                ("liked_tracks_cache", [
+                    {"total": 100, "items": [partial[0]]},
+                    {"items": partial},
+                    SpotifyError("saved page failed"),
+                ], lambda: api.daily_cached("liked_tracks_cache", lambda: api.liked_tracks(random.Random(1)))),
+            )
+            for key, responses, fetch in cases:
+                with self.subTest(key=key):
+                    api.get = Mock(side_effect=responses)
+                    with self.assertLogs("app.selection", level="WARNING") as logs:
+                        result = get_api_items(key, fetch)
+                    self.assertEqual(len(result), 1)
+                    self.assertIn("page failed", "\n".join(logs.output))
+                    self.assertIsNone(api.store.get_cached(key, day))
+
+            # Partial source playlists are usable, but the target must be read completely.
+            first_page = {"items": [{"item": {"uri": "spotify:track:1"}}], "next": "next"}
+            api.get = Mock(side_effect=[first_page, SpotifyError("playlist page failed")])
+            with self.assertLogs("app.selection", level="WARNING"):
+                result = get_api_items("source playlist", lambda: api.pages("/playlists/source/items"))
+            self.assertEqual(result, first_page["items"])
+
+            api.get = Mock(side_effect=[first_page, SpotifyError("playlist page failed")])
+            with self.assertRaisesRegex(SpotifyError, "playlist page failed"):
+                api.playlist_items("target")
+
+    def test_daily_liked_track_cache_survives_restart_and_expires_at_amsterdam_midnight(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "cache.sqlite")
             api = Spotify.__new__(Spotify)
@@ -429,25 +810,21 @@ class SpotifyTests(unittest.TestCase):
                 requests_seen.append((endpoint, params))
                 if endpoint == "/me/tracks":
                     return {"items": [{"track": {"id": "saved"}}], "next": None}
-                if endpoint == "/me/following":
-                    return {"artists": {"items": [{"id": "followed"}], "next": None}}
                 raise AssertionError(endpoint)
 
             api.get = get
             for utc_time, expected_calls in (
-                (datetime(2026, 1, 15, 22, 30, tzinfo=timezone.utc), 2),
-                (datetime(2026, 1, 15, 22, 59, tzinfo=timezone.utc), 2),
-                (datetime(2026, 1, 15, 23, 0, tzinfo=timezone.utc), 4),
+                (datetime(2026, 1, 15, 22, 30, tzinfo=timezone.utc), 1),
+                (datetime(2026, 1, 15, 22, 59, tzinfo=timezone.utc), 1),
+                (datetime(2026, 1, 15, 23, 0, tzinfo=timezone.utc), 2),
             ):
                 with patch("app.spotify.datetime") as clock:
                     clock.now.side_effect = lambda tz: utc_time.astimezone(tz)
                     api.store = Store(path)
                     saved = api.daily_cached(
-                        "saved_tracks", lambda: api.pages("/me/tracks", {"market": "NL"}, max_items=None)
+                        "liked_tracks_cache", lambda: api.pages("/me/tracks", {"market": "NL"}, max_items=None)
                     )
-                    followed = api.daily_cached("followed_artists", api.followed_artists)
                 self.assertEqual(saved, [{"track": {"id": "saved"}}])
-                self.assertEqual(followed, [{"id": "followed"}])
                 self.assertEqual(len(requests_seen), expected_calls)
 
     def test_empty_daily_cache_is_reused_and_summer_midnight_expires(self):
@@ -460,7 +837,7 @@ class SpotifyTests(unittest.TestCase):
                                  datetime(2026, 7, 15, 21, 59, tzinfo=timezone.utc),
                                  datetime(2026, 7, 15, 22, 0, tzinfo=timezone.utc)):
                     clock.now.side_effect = lambda tz: utc_time.astimezone(tz)
-                    self.assertEqual(api.daily_cached("followed_artists", fetch), [])
+                    self.assertEqual(api.daily_cached("liked_tracks_cache", fetch), [])
             self.assertEqual(fetch.call_count, 2)
 
     def test_failed_or_incomplete_fetch_is_not_cached(self):
@@ -476,8 +853,8 @@ class SpotifyTests(unittest.TestCase):
                 ]) as get:
                     fetch = lambda: api.pages("/me/tracks", {"market": "NL"}, max_items=None)
                     with self.assertRaises(SpotifyError):
-                        api.daily_cached("saved_tracks", fetch)
-                    self.assertEqual(api.daily_cached("saved_tracks", fetch), [{"track": {"id": "complete"}}])
+                        api.daily_cached("liked_tracks_cache", fetch)
+                    self.assertEqual(api.daily_cached("liked_tracks_cache", fetch), [{"track": {"id": "complete"}}])
                     self.assertEqual(get.call_count, 3)
 
     def test_empty_intermediate_page_fails_instead_of_caching_partial_results(self):
@@ -489,48 +866,108 @@ class SpotifyTests(unittest.TestCase):
     def test_refresh_token_rotation_preserves_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(os.path.join(directory, "cache.sqlite"))
-            store.set_many({"client_id": "client", "refresh_token": "old"})
-            store.set_cached("saved_tracks", "2026-01-01", [])
+            store.set_many({"client_id": "client", "refresh_token": "old",
+                            "followed_artists_cache": {"artists": {"artist": {"id": "artist"}}}})
+            store.set_cached("liked_tracks_cache", "2026-01-01", [])
             with patch("app.spotify.token_request", return_value={"access_token": "access", "refresh_token": "new"}):
                 Spotify(store)
             self.assertEqual(store.get("refresh_token"), "new")
-            self.assertEqual(store.get_cached("saved_tracks", "2026-01-01"), [])
+            self.assertEqual(store.get_cached("liked_tracks_cache", "2026-01-01"), [])
+            self.assertEqual(store.get("followed_artists_cache"), {"artists": {"artist": {"id": "artist"}}})
 
     def test_followed_artists_use_cursor_pagination(self):
-        api = Spotify.__new__(Spotify)
-        requests_seen = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "cache.sqlite")
+            api = Spotify.__new__(Spotify)
+            api.store = Store(path)
+            requests_seen = []
 
-        def get(path, **params):
-            requests_seen.append((path, params))
-            if "after" not in params:
-                return {"artists": {"items": [{"id": "first"}], "next": "next",
-                                    "cursors": {"after": "first"}}}
-            return {"artists": {"items": [{"id": "second"}], "next": None,
-                                "cursors": {"after": None}}}
+            def get(endpoint, **params):
+                requests_seen.append((endpoint, params))
+                number = int(params.get("after", "0")) + 1
+                return {"artists": {"items": [{"id": str(number)}],
+                                    "next": "next" if number < 7 else None,
+                                    "cursors": {"after": str(number)}}}
 
-        api.get = get
-        self.assertEqual(api.followed_artists(), [{"id": "first"}, {"id": "second"}])
-        self.assertEqual(requests_seen, [
-            ("/me/following", {"type": "artist", "limit": 50}),
-            ("/me/following", {"type": "artist", "limit": 50, "after": "first"}),
-        ])
+            api.get = get
+            with patch("app.spotify.datetime") as clock:
+                # The first day stops at five requests, even after reopening SQLite.
+                clock.now.return_value = datetime(2026, 1, 15, tzinfo=timezone.utc)
+                self.assertEqual(len(api.followed_artists()), 5)
+                api.store = Store(path)
+                self.assertEqual(len(api.followed_artists()), 5)
+                self.assertEqual(len(requests_seen), 5)
+                # The next day resumes after the fifth page and stops at the end.
+                clock.now.return_value = datetime(2026, 1, 16, tzinfo=timezone.utc)
+                self.assertEqual(len(api.followed_artists()), 7)
+                self.assertEqual(requests_seen[5], (
+                    "/me/following", {"type": "artist", "limit": 50, "after": "5"}
+                ))
+                self.assertEqual(len(requests_seen), 7)
+                self.assertEqual(len(api.followed_artists()), 7)
+                self.assertEqual(len(requests_seen), 7)
+
+    def test_followed_artists_remove_unfollowed_only_after_a_complete_rescan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = Spotify.__new__(Spotify)
+            api.store = Store(os.path.join(directory, "cache.sqlite"))
+            api.get = Mock(return_value={"artists": {
+                "items": [{"id": "old"}, {"id": "kept"}], "next": None
+            }})
+            with patch("app.spotify.datetime") as clock:
+                clock.now.return_value = datetime(2026, 1, 15, tzinfo=timezone.utc)
+                self.assertEqual(len(api.followed_artists()), 2)
+                clock.now.return_value = datetime(2026, 1, 16, tzinfo=timezone.utc)
+                # An interrupted rescan must not remove artists from the old cache.
+                api.get.side_effect = [
+                    {"artists": {"items": [{"id": "kept"}], "next": "next", "cursors": {"after": "kept"}}},
+                    SpotifyError("unavailable"),
+                    {"artists": {"items": [{"id": "new"}], "next": None}},
+                ]
+                with self.assertLogs("app.selection", level="WARNING"):
+                    partial = get_api_items("followed artists", api.followed_artists)
+                self.assertEqual({artist["id"] for artist in partial}, {"old", "kept"})
+                result = api.followed_artists()
+                self.assertEqual({artist["id"] for artist in result}, {"kept", "new"})
+
+    def test_followed_artist_failed_requests_count_towards_daily_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = Spotify.__new__(Spotify)
+            api.store = Store(os.path.join(directory, "cache.sqlite"))
+            api.get = Mock(side_effect=SpotifyError("unavailable"))
+            with patch("app.spotify.datetime") as clock:
+                clock.now.return_value = datetime(2026, 1, 15, tzinfo=timezone.utc)
+                for _ in range(5):
+                    with self.assertRaisesRegex(SpotifyError, "unavailable"):
+                        api.followed_artists()
+                with self.assertRaisesRegex(SpotifyError, "unavailable"):
+                    api.followed_artists()
+                self.assertEqual(api.get.call_count, 5)
+                clock.now.return_value = datetime(2026, 1, 16, tzinfo=timezone.utc)
+                with self.assertRaisesRegex(SpotifyError, "unavailable"):
+                    api.followed_artists()
+                self.assertEqual(api.get.call_count, 6)
 
     def test_invalid_followed_artist_cursor_fails(self):
-        api = Spotify.__new__(Spotify)
-        api.get = lambda *args, **kwargs: {
-            "artists": {"items": [{"id": "first"}], "next": "next", "cursors": {"after": "first"}}
-        }
-        with self.assertRaisesRegex(SpotifyError, "pagination cursor"):
-            api.followed_artists()
+        with tempfile.TemporaryDirectory() as directory:
+            api = Spotify.__new__(Spotify)
+            api.store = Store(os.path.join(directory, "cache.sqlite"))
+            api.get = lambda *args, **kwargs: {
+                "artists": {"items": [{"id": "first"}], "next": "next", "cursors": {"after": "first"}}
+            }
+            with self.assertRaisesRegex(SpotifyError, "pagination cursor"):
+                api.followed_artists()
 
     def test_missing_follow_permission_gives_reconnect_guidance(self):
-        api = Spotify.__new__(Spotify)
-        api.token = "token"
-        with patch("app.spotify.requests.request") as request:
-            request.return_value.ok = False
-            request.return_value.status_code = 403
-            with self.assertRaisesRegex(SpotifyError, "reconnect Spotify.*followed artists"):
-                api.followed_artists()
+        with tempfile.TemporaryDirectory() as directory:
+            api = Spotify.__new__(Spotify)
+            api.store = Store(os.path.join(directory, "cache.sqlite"))
+            api.token = "token"
+            with patch("app.spotify.requests.request") as request:
+                request.return_value.ok = False
+                request.return_value.status_code = 403
+                with self.assertRaisesRegex(SpotifyError, "reconnect Spotify.*followed artists"):
+                    api.followed_artists()
 
     def test_missing_library_permission_gives_reconnect_guidance(self):
         api = Spotify.__new__(Spotify)
@@ -621,6 +1058,7 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.store.history()[0]["status"], "uncertain")
         self.assertIsNotNone(self.store.pending())
 
+        # Once Spotify is reachable again, compare its playlist with the saved snapshots.
         class Recovered:
             def playlist_items(self, pid):
                 return ["new"]
@@ -662,6 +1100,33 @@ class RefreshTests(unittest.TestCase):
         self.assertIn("/me/top/artists", entry["detail"])
         self.assertIsNone(self.store.pending())
         self.assertEqual(request.call_args.args[0], "GET")
+
+    def test_skipped_rate_limit_is_recorded_if_selection_fails(self):
+        class Fake(UncachedSpotify):
+            def playlist_items(self, pid):
+                return ["old"]
+
+            def get(self, path, **params):
+                if path == "/me/top/tracks":
+                    raise SpotifyRateLimitError("Retry-After: '45'")
+                return {"items": []}
+
+            def pages(self, path, params, max_items=1000):
+                return []
+
+            def followed_artists(self):
+                return []
+
+            def replace(self, pid, items):
+                raise AssertionError("should not write")
+
+        with patch("app.refresh.Spotify", return_value=Fake()), self.assertLogs("app", level="WARNING"):
+            with self.assertRaises(SpotifyError):
+                self.service.run()
+        entry = self.store.history()[0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("Retry-After: '45'", entry["detail"])
+        self.assertIsNone(self.store.pending())
 
     def test_write_rate_limit_is_recorded_if_old_playlist_is_confirmed(self):
         api = Spotify.__new__(Spotify)

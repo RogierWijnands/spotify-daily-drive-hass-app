@@ -29,6 +29,7 @@ class Refresh:
             raise SpotifyError("Previous change has an uncertain outcome; check and restore the playlist manually")
 
     def run(self, scheduled_key=None):
+        # Prevent manual and scheduled refreshes from replacing the playlist at once.
         if not self.lock.acquire(blocking=False):
             log.warning("Refresh skipped: another refresh is already running")
             raise SpotifyError("A refresh is already running")
@@ -39,6 +40,7 @@ class Refresh:
             if history_id is None:
                 return
 
+            # Resolve any uncertain previous write before preparing a new one.
             api = Spotify(self.store)
             self.reconcile(api)
             pid = self.store.get("playlist_id")
@@ -48,6 +50,7 @@ class Refresh:
             if pid in source_ids:
                 raise SpotifyError("Daily Drive cannot also be a music source")
 
+            # Build the complete replacement before making any playlist changes.
             before = api.playlist_items(pid)
             after, episodes, detail = build(
                 api, source_ids, self.store.get("news_shows", []),
@@ -56,6 +59,7 @@ class Refresh:
             if len(after) > 100:
                 raise SpotifyError("Spotify allows at most 100 items per replacement")
 
+            # Report repeated episodes without excluding the latest available ones.
             previously_used = self.store.used_episodes()
             repeated = sum(uri in previously_used for uri in episodes)
             if repeated:
@@ -83,6 +87,7 @@ class Refresh:
         except Exception as exc:
             log.exception("Daily Drive refresh failed")
             if history_id is not None:
+                # A pending write means the actual playlist contents are still unknown.
                 status = "uncertain" if self.store.pending() else "failed"
                 self.store.finish(history_id, status, str(exc))
             raise

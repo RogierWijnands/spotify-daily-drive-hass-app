@@ -21,7 +21,14 @@ class SpotifyRateLimitError(SpotifyError):
     pass
 
 
+class SpotifyPartialError(SpotifyError):
+    def __init__(self, error, items):
+        super().__init__(str(error))
+        self.items = items
+
+
 def _request_error(response, message):
+    # Keep Spotify's retry delay visible in logs and failed refresh history.
     if response.status_code != 429:
         return SpotifyError(message)
     retry_after = response.headers.get("Retry-After")
@@ -36,6 +43,7 @@ def _spotify_id(value, kind):
     value = value.strip()
     parsed = urlparse(value)
 
+    # Accept a Spotify URL, URI, or bare ID, then validate the extracted ID.
     if parsed.scheme == "https" and parsed.netloc == "open.spotify.com":
         parts = parsed.path.strip("/").split("/")
         if len(parts) == 2 and parts[0] == kind:
@@ -76,6 +84,7 @@ def authorization(client_id):
 
 
 def callback_code(url, state):
+    # Only accept a callback for our redirect address and this authorization attempt.
     parsed = urlparse(url.strip())
     expected = urlparse(REDIRECT_URI)
     if (parsed.scheme, parsed.netloc, parsed.path) != (expected.scheme, expected.netloc, expected.path):
@@ -106,6 +115,7 @@ class Spotify:
         if not client_id or not refresh:
             raise SpotifyError("Connect Spotify in the settings first")
 
+        # Refresh tokens may rotate; save a replacement without clearing the cache.
         token = token_request({"grant_type": "refresh_token", "refresh_token": refresh, "client_id": client_id})
         if token.get("refresh_token"):
             store.set_many({"refresh_token": token["refresh_token"]})
@@ -133,47 +143,142 @@ class Spotify:
     def daily_cached(self, key, fetch):
         day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
         cached = self.store.get_cached(key, day)
+
+        # An empty list is a valid hit; only cache after a complete fetch.
         if cached is not None:
             return cached
         result = fetch()
         self.store.set_cached(key, day, result)
         return result
 
+    def liked_tracks(self, rng):
+        # Discover the library size before sampling up to five distinct pages.
+        first = self.get("/me/tracks", market="NL", limit=1, offset=0)
+        if not isinstance(first, dict):
+            raise SpotifyError("Spotify returned an invalid liked-track page")
+        total = first.get("total")
+        if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+            raise SpotifyError("Spotify returned an invalid liked-track count")
+        if not isinstance(first.get("items"), list) or len(first["items"]) != min(total, 1):
+            raise SpotifyError("Spotify returned an inconsistent liked-track count")
+        if total <= 1:
+            return first["items"]
+
+        page_count = (total + 49) // 50
+        pages = rng.sample(range(page_count), min(5, page_count))
+        result = []
+        try:
+            for page in pages:
+                response = self.get("/me/tracks", market="NL", limit=50, offset=page * 50)
+                if not isinstance(response, dict) or not isinstance(response.get("items"), list) \
+                        or not response["items"]:
+                    raise SpotifyError("Spotify returned an invalid sampled liked-track page")
+                result.extend(response["items"])
+        except (SpotifyError, requests.RequestException) as exc:
+            if result:
+                raise SpotifyPartialError(exc, result) from exc
+            raise
+        return result
+
     def pages(self, path, params=None, max_items=1000):
+        # Follow offset-based pages in order; an incomplete read is not a full result.
         params = dict(params or {})
         params["limit"] = 50
         offset = 0
         result = []
 
-        while True:
-            page = self.get(path, **params, offset=offset)
-            items = page["items"]
-            result.extend(items)
-            if not page.get("next"):
-                return result
-            if not items:
-                raise SpotifyError(f"Empty page with a next page in {path}")
-            offset += len(items)
-            if max_items is not None and offset >= max_items:
-                raise SpotifyError(f"Too many items in {path}; change aborted")
+        try:
+            while True:
+                page = self.get(path, **params, offset=offset)
+                if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+                    raise SpotifyError(f"Invalid page in {path}")
+                items = page["items"]
+                result.extend(items)
+                if not page.get("next"):
+                    return result
+                if not items:
+                    raise SpotifyError(f"Empty page with a next page in {path}")
+                offset += len(items)
+                if max_items is not None and offset >= max_items:
+                    raise SpotifyError(f"Too many items in {path}; change aborted")
+        except (SpotifyError, requests.RequestException) as exc:
+            if result:
+                raise SpotifyPartialError(exc, result) from exc
+            raise
 
     def followed_artists(self):
-        result = []
-        seen_cursors = set()
-        params = {"type": "artist", "limit": 50}
+        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        key = "followed_artists_cache"
 
-        while True:
-            page = self.get("/me/following", **params)["artists"]
-            result.extend(page["items"])
-            if not page["next"]:
-                return result
-            if not page["items"]:
-                raise SpotifyError("Empty followed-artist page with a next page")
-            cursor = page["cursors"]["after"]
-            if not cursor or cursor in seen_cursors:
-                raise SpotifyError("Spotify returned an invalid followed-artist pagination cursor")
-            seen_cursors.add(cursor)
-            params["after"] = cursor
+        # Keep the collected artists and scan position between refreshes and restarts.
+        state = self.store.get(key, {
+            "artists": {}, "cursor": None, "seen_ids": [], "seen_cursors": [],
+            "day": None, "requests": 0, "completed_day": None, "last_error": None,
+        })
+        if state["day"] != day:
+            state["day"] = day
+            state["requests"] = 0
+
+        # Spotify gives us a cursor for the next page, not a random page number.
+        # Continue from that cursor with at most five requests per Amsterdam day.
+        try:
+            if state["requests"] >= 5 and state["last_error"]:
+                raise SpotifyError(state["last_error"])
+            while state["requests"] < 5 and state["completed_day"] != day:
+                params = {"type": "artist", "limit": 50}
+                if state["cursor"] is not None:
+                    params["after"] = state["cursor"]
+
+                # Count the attempt before sending it, including failed requests.
+                state["requests"] += 1
+                self.store.set_many({key: state})
+                response = self.get("/me/following", **params)
+                if not isinstance(response, dict) or not isinstance(response.get("artists"), dict):
+                    raise SpotifyError("Spotify returned an invalid followed-artist page")
+                page = response["artists"]
+                if not isinstance(page.get("items"), list) or "next" not in page or not all(
+                    isinstance(artist, dict) and isinstance(artist.get("id"), str) and artist["id"]
+                    for artist in page["items"]
+                ):
+                    raise SpotifyError("Spotify returned an invalid followed-artist page")
+                if page["next"]:
+                    if not page["items"]:
+                        raise SpotifyError("Empty followed-artist page with a next page")
+                    cursors = page.get("cursors")
+                    cursor = cursors.get("after") if isinstance(cursors, dict) else None
+                    # A missing or repeated cursor cannot safely advance the scan.
+                    if not isinstance(cursor, str) or not cursor or cursor in state["seen_cursors"]:
+                        raise SpotifyError("Spotify returned an invalid followed-artist pagination cursor")
+                else:
+                    cursor = None
+
+                # Keep every discovered artist available while the scan is incomplete.
+                for artist in page["items"]:
+                    state["artists"][artist["id"]] = artist
+                    state["seen_ids"].append(artist["id"])
+                state["cursor"] = cursor
+                state["last_error"] = None
+                if cursor is not None:
+                    state["seen_cursors"].append(cursor)
+                else:
+                    # Only remove unfollowed artists after the whole scan succeeds.
+                    # The next scan starts at the beginning on a later day.
+                    seen = set(state["seen_ids"])
+                    state["artists"] = {
+                        artist_id: artist for artist_id, artist in state["artists"].items() if artist_id in seen
+                    }
+                    state["seen_ids"] = []
+                    state["seen_cursors"] = []
+                    state["completed_day"] = day
+                self.store.set_many({key: state})
+        except (SpotifyError, requests.RequestException) as exc:
+            # Report the error but let selection use any artists already in the cache.
+            state["last_error"] = str(exc)
+            self.store.set_many({key: state})
+            if state["artists"]:
+                raise SpotifyPartialError(exc, list(state["artists"].values())) from exc
+            raise
+        return list(state["artists"].values())
 
     def playlist_items(self, pid):
         entries = self.pages(f"/playlists/{pid}/items", {"additional_types": "track,episode", "market": "NL"})
