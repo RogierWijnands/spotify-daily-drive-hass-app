@@ -41,11 +41,12 @@ https://open.spotify.com/show/3Ab6DGFJL7VE5ToIH4r6w1, 1
 - **Episodes:** the latest playable episodes take priority. News and podcasts are mixed with music where possible. No duplicates within a playlist; previously used episodes can recur while still latest.
 - **Music:** top, recent and liked tracks; releases by favorite artists and their collaborators; optional source playlists. Discoveries are not Spotify recommendations and individual sources are not guaranteed in every refresh.
 - **History:** Spotify's longest top-artist and top-track ranges cover approximately one year, not all time.
-- **Artists:** all available top and followed artists are combined, deduplicated and shuffled; up to eight are selected for release discovery per refresh.
+- **Artists:** up to 50 top artists from a randomly chosen short-, medium- or long-term range are combined with followed artists, deduplicated and shuffled. Up to eight are selected for release discovery per refresh.
 - **Collaborators:** up to four are selected randomly; up to two albums or singles each are searched, favoring recent releases.
 - **Source playlists:** new Spotify apps can read only playlists you own or collaborate on. Copy Discover Weekly or Release Radar into your own playlists to use them; the copies do not update automatically.
 - **Duration:** target 90 minutes ±2 minutes and 70/30 music/podcasts. Episodes take priority, so duration and ratio can differ.
 - **Preparation failures:** insufficient playable music or episodes, inaccessible sources, local or unreadable playlist items, API restrictions and rate limits can cause a refresh to fail without replacing the playlist. Check the app log.
+- **Rate limits:** failed refresh history includes Spotify's `Retry-After` value when provided. The app does not automatically retry.
 
 ## Playlist safety
 

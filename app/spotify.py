@@ -15,6 +15,21 @@ class SpotifyError(RuntimeError):
     pass
 
 
+class SpotifyRateLimitError(SpotifyError):
+    pass
+
+
+def _request_error(response, message):
+    if response.status_code != 429:
+        return SpotifyError(message)
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        message += f"; Retry-After: {retry_after!r}"
+    else:
+        message += "; Retry-After not provided"
+    return SpotifyRateLimitError(message)
+
+
 def _spotify_id(value, kind):
     value = value.strip()
     parsed = urlparse(value)
@@ -77,7 +92,7 @@ def callback_code(url, state):
 def token_request(data):
     response = requests.post(TOKEN_URL, data=data, timeout=20)
     if not response.ok:
-        raise SpotifyError(f"Spotify token request failed (HTTP {response.status_code})")
+        raise _request_error(response, f"Spotify token request failed (HTTP {response.status_code})")
     return response.json()
 
 
@@ -107,7 +122,7 @@ class Spotify:
                     f"Followed artists are inaccessible (HTTP {response.status_code}); "
                     "reconnect Spotify and grant access to followed artists"
                 )
-            raise SpotifyError(f"Spotify {method} {path} failed (HTTP {response.status_code})")
+            raise _request_error(response, f"Spotify {method} {path} failed (HTTP {response.status_code})")
         return response.json() if response.content else {}
 
     def get(self, path, **params):

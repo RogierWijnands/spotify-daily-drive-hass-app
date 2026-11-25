@@ -25,6 +25,14 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"00:00, 04:00, 08:00, 12:00, 16:00, 20:00", response.data)
         self.assertEqual(self.client.post("/refresh", environ_overrides=self.remote).status_code, 403)
 
+    def test_history_displays_rate_limit_retry_after(self):
+        entry = {"started": "2026-01-01", "status": "failed",
+                 "detail": "Spotify GET /me/top/artists failed (HTTP 429); Retry-After: '45'"}
+        with patch.object(web.store, "history", return_value=[entry]):
+            response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b"HTTP 429", response.data)
+        self.assertIn(b"Retry-After: &#39;45&#39;", response.data)
+
     def test_configuration_accepts_urls_and_rejects_target_as_source(self):
         pid = "0123456789ABCDEFGHIJKL"
         data = {

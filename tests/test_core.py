@@ -9,7 +9,7 @@ from app.refresh import Refresh
 from app.selection import (
     build, build_items, interleave, music_candidates, select_music, podcast_candidates,
 )
-from app.spotify import Spotify, SpotifyError, authorization, callback_code, playlist_id, show_id
+from app.spotify import Spotify, SpotifyError, authorization, callback_code, playlist_id, show_id, token_request
 from app.store import Store
 
 NEWS = "news"
@@ -145,6 +145,8 @@ class SelectionTests(unittest.TestCase):
                     return {"items": [song(i) for i in range(start, start + 10)]}
                 if path == "/me/player/recently-played":
                     return {"items": [{"track": song(1)}]}
+                if path == "/me/top/artists":
+                    return {"items": [{"id": "artist"}]}
                 if path == "/artists/artist/albums":
                     return {"items": [{"id": "album", "release_date": "2026-01-01"}]}
                 if path == "/albums/album/tracks":
@@ -154,8 +156,6 @@ class SelectionTests(unittest.TestCase):
             def pages(self, path, params, max_items=1000):
                 if path == "/me/tracks":
                     return [{"track": song(i)} for i in range(50, 55)]
-                if path == "/me/top/artists":
-                    return [{"id": "artist"}]
                 return [{"item": song(i)} for i in range(45, 50)]
 
             def followed_artists(self):
@@ -178,8 +178,6 @@ class SelectionTests(unittest.TestCase):
                 return {"items": []}
 
             def pages(self, path, params, max_items=1000):
-                if path == "/me/top/artists":
-                    return []
                 self.request = (path, params, max_items)
                 return ([{"track": song(i)} for i in range(30)] +
                         [{"track": song(99, False)}, {"track": None}])
@@ -210,6 +208,9 @@ class SelectionTests(unittest.TestCase):
                 self.top_artist_params = None
 
             def get(self, path, **params):
+                if path == "/me/top/artists":
+                    self.top_artist_params = params
+                    return {"items": [{"id": "favorite"}, {"id": "other-favorite"}]}
                 if path.startswith("/artists/"):
                     artist = path.split("/")[2]
                     self.requested_artists.append((artist, params["include_groups"]))
@@ -229,9 +230,6 @@ class SelectionTests(unittest.TestCase):
                 return {"items": []}
 
             def pages(self, path, params, max_items=1000):
-                if path == "/me/top/artists":
-                    self.top_artist_params = (params, max_items)
-                    return [{"id": "favorite"}, {"id": "other-favorite"}]
                 return []
 
             def followed_artists(self):
@@ -239,7 +237,8 @@ class SelectionTests(unittest.TestCase):
 
         api = Fake()
         groups = music_candidates(api, [], random.Random(2))
-        self.assertEqual(api.top_artist_params, ({"time_range": "long_term"}, None))
+        self.assertIn(api.top_artist_params["time_range"], ("short_term", "medium_term", "long_term"))
+        self.assertEqual(api.top_artist_params["limit"], 50)
         self.assertCountEqual(api.requested_artists, [
             ("favorite", "album,single,appears_on"),
             ("other-favorite", "album,single,appears_on"),
@@ -256,6 +255,8 @@ class SelectionTests(unittest.TestCase):
                 self.collaborators = []
 
             def get(self, path, **params):
+                if path == "/me/top/artists":
+                    return {"items": [{"id": "favorite"}]}
                 if path == "/artists/favorite/albums":
                     return {"items": [{"id": "favorite-album"}]}
                 if path == "/albums/favorite-album/tracks":
@@ -267,8 +268,6 @@ class SelectionTests(unittest.TestCase):
                 return {"items": []}
 
             def pages(self, path, params, max_items=1000):
-                if path == "/me/top/artists":
-                    return [{"id": "favorite"}]
                 return []
 
             def followed_artists(self):
@@ -279,34 +278,45 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(api.collaborators), 4)
         self.assertEqual(len(set(api.collaborators)), 4)
 
-    def test_artist_pool_uses_all_pages_before_selecting_eight(self):
+    def test_artist_range_is_chosen_per_refresh_and_limited_to_one_page(self):
         class Fake:
-            pages = Spotify.pages
-
             def __init__(self):
-                self.offsets = []
+                self.top_requests = []
                 self.selected = []
 
             def get(self, path, **params):
                 if path == "/me/top/artists":
-                    self.offsets.append(params["offset"])
-                    if params["time_range"] != "long_term" or params["limit"] != 50:
-                        raise AssertionError(params)
-                    start = params["offset"]
-                    return {"items": [{"id": str(i)} for i in range(start, min(start + 50, 75))],
-                            "next": "next" if start == 0 else None}
+                    self.top_requests.append(params)
+                    return {"items": [{"id": str(i)} for i in range(50)], "next": "next"}
                 if path.startswith("/artists/"):
                     self.selected.append(int(path.split("/")[2]))
                 return {"items": [], "next": None}
 
+            def pages(self, path, params, max_items=1000):
+                if path == "/me/top/artists":
+                    raise AssertionError("Top artists must not be paginated")
+                return []
+
             def followed_artists(self):
                 return []
 
-        api = Fake()
-        music_candidates(api, [], random.Random(5))
-        self.assertEqual(api.offsets, [0, 50])
-        self.assertEqual(len(api.selected), 8)
-        self.assertTrue(any(artist >= 50 for artist in api.selected))
+        class FixedRange(random.Random):
+            def __init__(self, value):
+                super().__init__(5)
+                self.value = value
+
+            def choice(self, options):
+                if self.value not in options:
+                    raise AssertionError(options)
+                return self.value
+
+        for time_range in ("short_term", "medium_term", "long_term"):
+            with self.subTest(time_range=time_range):
+                api = Fake()
+                music_candidates(api, [], FixedRange(time_range))
+                self.assertEqual(api.top_requests, [{"time_range": time_range, "limit": 50}])
+                self.assertEqual(len(api.selected), 8)
+                self.assertTrue(all(0 <= artist < 50 for artist in api.selected))
 
     def test_followed_artists_are_deduplicated_and_their_tracks_are_candidates(self):
         class Fake:
@@ -314,6 +324,8 @@ class SelectionTests(unittest.TestCase):
                 self.selected = []
 
             def get(self, path, **params):
+                if path == "/me/top/artists":
+                    return {"items": [{"id": "both"}]}
                 if path.startswith("/artists/"):
                     artist = path.split("/")[2]
                     self.selected.append(artist)
@@ -324,7 +336,7 @@ class SelectionTests(unittest.TestCase):
                 return {"items": []}
 
             def pages(self, path, params, max_items=1000):
-                return [{"id": "both"}] if path == "/me/top/artists" else []
+                return []
 
             def followed_artists(self):
                 return [{"id": "both"}, {"id": "followed"}]
@@ -419,6 +431,28 @@ class SpotifyTests(unittest.TestCase):
             with self.assertRaisesRegex(SpotifyError, "reconnect Spotify"):
                 api.get("/me/tracks")
 
+    def test_rate_limit_reports_retry_after_or_its_absence(self):
+        api = Spotify.__new__(Spotify)
+        api.token = "token"
+        with patch("app.spotify.requests.request") as request:
+            request.return_value.ok = False
+            request.return_value.status_code = 429
+            for headers, message in (({"Retry-After": "42"}, "Retry-After: '42'"),
+                                     ({}, "Retry-After not provided")):
+                with self.subTest(headers=headers):
+                    request.return_value.headers = headers
+                    with self.assertRaises(SpotifyError) as error:
+                        api.get("/me/top/artists")
+                    self.assertIn(message, str(error.exception))
+
+    def test_token_rate_limit_reports_retry_after(self):
+        with patch("app.spotify.requests.post") as post:
+            post.return_value.ok = False
+            post.return_value.status_code = 429
+            post.return_value.headers = {"Retry-After": "30"}
+            with self.assertRaisesRegex(SpotifyError, "Retry-After: '30'"):
+                token_request({})
+
 
 class RefreshTests(unittest.TestCase):
     def setUp(self):
@@ -499,6 +533,66 @@ class RefreshTests(unittest.TestCase):
                 self.service.run()
         self.assertIsNone(self.store.pending())
         self.assertEqual(self.store.history()[0]["status"], "failed")
+
+    def test_rate_limit_is_recorded_in_history_without_replacing(self):
+        api = Spotify.__new__(Spotify)
+        api.token = "token"
+        with patch("app.refresh.Spotify", return_value=api), patch.object(
+                api, "playlist_items", return_value=["old"]), patch(
+                "app.refresh.build", side_effect=lambda *args: api.get("/me/top/artists")), patch(
+                "app.spotify.requests.request") as request:
+            request.return_value.ok = False
+            request.return_value.status_code = 429
+            request.return_value.headers = {"Retry-After": "45"}
+            with self.assertRaises(SpotifyError):
+                self.service.run()
+        entry = self.store.history()[0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("Retry-After: '45'", entry["detail"])
+        self.assertIn("/me/top/artists", entry["detail"])
+        self.assertIsNone(self.store.pending())
+        self.assertEqual(request.call_args.args[0], "GET")
+
+    def test_write_rate_limit_is_recorded_if_old_playlist_is_confirmed(self):
+        api = Spotify.__new__(Spotify)
+        api.token = "token"
+        with patch("app.refresh.Spotify", return_value=api), patch.object(
+                api, "playlist_items", return_value=["old"]), patch(
+                "app.refresh.build", return_value=(["new"], [], "detail")), patch(
+                "app.spotify.requests.request") as request:
+            request.return_value.ok = False
+            request.return_value.status_code = 429
+            request.return_value.headers = {"Retry-After": "60"}
+            with self.assertRaises(SpotifyError):
+                self.service.run()
+        entry = self.store.history()[0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("Retry-After: '60'", entry["detail"])
+        self.assertIsNone(self.store.pending())
+
+    def test_write_rate_limit_is_recorded_if_verification_fails(self):
+        api = Spotify.__new__(Spotify)
+        api.token = "token"
+        with patch("app.refresh.Spotify", return_value=api), patch(
+                "app.refresh.build", return_value=(["new"], [], "detail")), patch(
+                "app.spotify.requests.request") as request:
+            before, limited, failed_check = (unittest.mock.Mock(), unittest.mock.Mock(), unittest.mock.Mock())
+            before.ok = True
+            before.content = b"data"
+            before.json.return_value = {"items": [], "next": None}
+            limited.ok = False
+            limited.status_code = 429
+            limited.headers = {"Retry-After": "60"}
+            failed_check.ok = False
+            failed_check.status_code = 503
+            request.side_effect = [before, limited, failed_check]
+            with self.assertRaises(SpotifyError):
+                self.service.run()
+        entry = self.store.history()[0]
+        self.assertEqual(entry["status"], "uncertain")
+        self.assertIn("Retry-After: '60'", entry["detail"])
+        self.assertIn("verification failed", entry["detail"])
+        self.assertIsNotNone(self.store.pending())
 
     def test_conflicting_pending_write_must_be_explicitly_released(self):
         history_id = self.store.start()

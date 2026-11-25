@@ -2,7 +2,7 @@ import logging
 import threading
 
 from .selection import build
-from .spotify import Spotify, SpotifyError
+from .spotify import Spotify, SpotifyError, SpotifyRateLimitError
 
 log = logging.getLogger(__name__)
 
@@ -65,10 +65,18 @@ class Refresh:
             self.store.prepare(history_id, pid, before, after, episodes, detail)
             try:
                 api.replace(pid, after)
-            except Exception:
+            except Exception as exc:
                 # A lost response does not imply Spotify rejected the update.
-                if self.reconcile(api):
+                try:
+                    confirmed = self.reconcile(api)
+                except Exception as check_error:
+                    if isinstance(exc, SpotifyRateLimitError):
+                        raise SpotifyError(f"{exc}; playlist verification failed: {check_error}") from check_error
+                    raise
+                if confirmed:
                     return
+                if isinstance(exc, SpotifyRateLimitError):
+                    raise
                 raise SpotifyError("Spotify change was not applied")
             self.store.resolve(True)
             log.info("Daily Drive refreshed: %s", detail)

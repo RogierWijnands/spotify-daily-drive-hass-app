@@ -65,7 +65,8 @@ def music_candidates(api, playlist_ids, rng):
     old = [t for t in long if t.get("id") not in current_ids]
     favorites = short + medium + recent
 
-    top_artists = api.pages("/me/top/artists", {"time_range": "long_term"}, max_items=None)
+    time_range = rng.choice(("short_term", "medium_term", "long_term"))
+    top_artists = api.get("/me/top/artists", time_range=time_range, limit=50)["items"]
     artists = list({artist["id"]: artist for artist in top_artists + api.followed_artists()}.values())
     rng.shuffle(artists)
     discoveries = []
