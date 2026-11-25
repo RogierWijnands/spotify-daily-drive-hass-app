@@ -1,5 +1,5 @@
 name: Daily Drive
-version: "0.1.7"
+version: "0.1.8"
 slug: daily_drive
 description: Personal Spotify Daily Drive with podcasts and music.
 arch:

@@ -199,10 +199,14 @@ class SelectionTests(unittest.TestCase):
         class Fake:
             def __init__(self):
                 self.requested_artists = []
+                self.top_artist_params = None
 
             def get(self, path, **params):
                 if path == "/me/top/artists":
-                    return {"items": [{"id": "favorite"}, {"id": "other-favorite"}]}
+                    self.top_artist_params = params
+                    if params.get("time_range") == "long_term":
+                        return {"items": [{"id": "favorite"}, {"id": "other-favorite"}]}
+                    return {"items": []}
                 if path.startswith("/artists/"):
                     artist = path.split("/")[2]
                     self.requested_artists.append((artist, params["include_groups"]))
@@ -226,6 +230,7 @@ class SelectionTests(unittest.TestCase):
 
         api = Fake()
         groups = music_candidates(api, [], random.Random(2))
+        self.assertEqual(api.top_artist_params, {"time_range": "long_term", "limit": 20})
         self.assertCountEqual(api.requested_artists, [
             ("favorite", "album,single,appears_on"),
             ("other-favorite", "album,single,appears_on"),

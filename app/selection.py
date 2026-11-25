@@ -65,7 +65,7 @@ def music_candidates(api, playlist_ids, rng):
     old = [t for t in long if t.get("id") not in current_ids]
     favorites = short + medium + recent
 
-    artists = api.get("/me/top/artists", time_range="medium_term", limit=20)["items"]
+    artists = api.get("/me/top/artists", time_range="long_term", limit=20)["items"]
     rng.shuffle(artists)
     discoveries = []
     cutoff = (date.today() - timedelta(days=180)).isoformat()
