@@ -47,7 +47,7 @@ https://open.spotify.com/show/3Ab6DGFJL7VE5ToIH4r6w1, 1
 - **Duration:** 90 minutes ±2 minutes; the music/podcast ratio depends on the available content. A playlist may contain only podcasts if they already meet the duration.
 - **Preparation failures:** insufficient playable content, inaccessible target playlists, local or unreadable target items, authentication or storage errors can fail the refresh without replacing the playlist. Check the app log.
 - **Rate limits:** failed refresh history includes Spotify's `Retry-After` value when provided. The app does not automatically retry.
-- **Refresh history:** successful new refreshes show the music track count, an expandable selection summary and a playlist-ordered list of music and news/podcast episodes.
+- **Refresh history:** successful new refreshes show the music track count, an expandable selection summary including cache use, and a playlist-ordered list of music and news/podcast episodes.
 
 ## Playlist safety
 

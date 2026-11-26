@@ -140,15 +140,21 @@ class Spotify:
     def get(self, path, **params):
         return self.request("GET", path, params=params)
 
-    def daily_cached(self, key, fetch):
+    def daily_cached(self, key, fetch, trace=None):
         day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
         cached = self.store.get_cached(key, day)
 
         # An empty list is a valid hit; only cache after a complete fetch.
         if cached is not None:
+            if trace is not None:
+                trace.append(f"{key.removesuffix('_cache').replace('_', ' ').capitalize()}: "
+                             "retrieved from today's cache.")
             return cached
         result = fetch()
         self.store.set_cached(key, day, result)
+        if trace is not None:
+            trace.append(f"{key.removesuffix('_cache').replace('_', ' ').capitalize()}: "
+                         "retrieved from Spotify and saved in today's cache.")
         return result
 
     def liked_tracks(self, rng):
@@ -206,7 +212,7 @@ class Spotify:
                 raise SpotifyPartialError(exc, result) from exc
             raise
 
-    def followed_artists(self):
+    def followed_artists(self, trace=None):
         day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
         key = "followed_artists_cache"
 
@@ -215,15 +221,34 @@ class Spotify:
             "artists": {}, "cursor": None, "seen_ids": [], "seen_cursors": [],
             "day": None, "requests": 0, "completed_day": None, "last_error": None,
         })
+        cached_ids = set(state["artists"])
+        fetched_ids = set()
+
+        def report_cache():
+            if trace is not None:
+                result_ids = set(state["artists"])
+                reused = len(result_ids & cached_ids - fetched_ids)
+                refreshed = len(result_ids & fetched_ids)
+                trace.append(f"Followed artists: {reused} reused from cache; "
+                             f"{refreshed} retrieved from Spotify during this refresh.")
+
         if state["day"] != day:
             state["day"] = day
             state["requests"] = 0
 
+        if state["requests"] >= 5 and state["last_error"]:
+            report_cache()
+            error = SpotifyError(
+                "Followed-artist daily limit of 5 requests reached; no new Spotify request. "
+                f"The previous error (including any Retry-After from that time) was: {state['last_error']}"
+            )
+            if state["artists"]:
+                raise SpotifyPartialError(error, list(state["artists"].values()))
+            raise error
+
         # Spotify gives us a cursor for the next page, not a random page number.
         # Continue from that cursor with at most five requests per Amsterdam day.
         try:
-            if state["requests"] >= 5 and state["last_error"]:
-                raise SpotifyError(state["last_error"])
             while state["requests"] < 5 and state["completed_day"] != day:
                 params = {"type": "artist", "limit": 50}
                 if state["cursor"] is not None:
@@ -256,6 +281,7 @@ class Spotify:
                 for artist in page["items"]:
                     state["artists"][artist["id"]] = artist
                     state["seen_ids"].append(artist["id"])
+                    fetched_ids.add(artist["id"])
                 state["cursor"] = cursor
                 state["last_error"] = None
                 if cursor is not None:
@@ -275,9 +301,11 @@ class Spotify:
             # Report the error but let selection use any artists already in the cache.
             state["last_error"] = str(exc)
             self.store.set_many({key: state})
+            report_cache()
             if state["artists"]:
                 raise SpotifyPartialError(exc, list(state["artists"].values())) from exc
             raise
+        report_cache()
         return list(state["artists"].values())
 
     def playlist_items(self, pid):

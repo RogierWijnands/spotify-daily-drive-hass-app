@@ -113,8 +113,17 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                                          lambda: api.get("/me/top/tracks", time_range="long_term", limit=50), issues)
     recent_entries = get_api_items("recent tracks", lambda: api.get("/me/player/recently-played", limit=50), issues)
     recently_played_tracks = [entry.get("track") for entry in recent_entries if isinstance(entry, dict)]
+
+    def fetch_liked_tracks():
+        def fetch():
+            return api.liked_tracks(rng)
+
+        if trace is None:
+            return api.daily_cached("liked_tracks_cache", fetch)
+        return api.daily_cached("liked_tracks_cache", fetch, trace=trace)
+
     liked_track_cache = get_api_items(
-        "liked tracks", lambda: api.daily_cached("liked_tracks_cache", lambda: api.liked_tracks(rng)), issues
+        "liked tracks", fetch_liked_tracks, issues
     )
     liked_tracks = [entry.get("track") for entry in liked_track_cache if isinstance(entry, dict)]
     short_term_top_tracks = [item for item in short_term_top_tracks if isinstance(item, dict)]
@@ -131,7 +140,8 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
     random_time_range = rng.choice(("short_term", "medium_term", "long_term"))
     top_artists = get_api_items("top artists",
                                 lambda: api.get("/me/top/artists", time_range=random_time_range, limit=50), issues)
-    followed_artists = get_api_items("followed artists", api.followed_artists, issues)
+    fetch_followed = api.followed_artists if trace is None else lambda: api.followed_artists(trace=trace)
+    followed_artists = get_api_items("followed artists", fetch_followed, issues)
 
     # Load configured playlists before building the artist pool so their artists
     # can also contribute discoveries.
