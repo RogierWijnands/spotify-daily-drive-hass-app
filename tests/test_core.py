@@ -417,7 +417,8 @@ class SelectionTests(unittest.TestCase):
             ("favorite", "album,single,appears_on"),
             ("other-favorite", "album,single,appears_on"),
             ("collaborator", "album,single")])
-        self.assertIn("Collaborators searched: Guest Artist (collaborator)", "\n".join(trace))
+        self.assertIn("Collaborators searched: Guest Artist (collaborator); up to two available releases "
+                      "per searched artist were randomly chosen.", "\n".join(trace))
         self.assertEqual(len(groups[-1]), 26)
         self.assertIn("unplayable", [item["id"] for item in groups[-1]])
         self.assertNotIn("unrelated-album-track", [item["id"] for item in groups[-1]])
@@ -493,7 +494,7 @@ class SelectionTests(unittest.TestCase):
             {"market": "NL", "include_groups": "album,single,appears_on", "limit": 1, "offset": 12},
         ])
 
-    def test_nearby_sampled_releases_share_a_request_and_fall_back_on_failure(self):
+    def test_nearby_randomly_chosen_releases_share_a_request_and_fall_back_on_failure(self):
         class Fake(UncachedSpotify):
             def __init__(self, fail_combined):
                 self.fail_combined = fail_combined
@@ -1071,7 +1072,7 @@ class SpotifyTests(unittest.TestCase):
         with self.assertRaises(SpotifyError):
             api.pages("/me/tracks")
 
-    def test_liked_track_sample_selects_up_to_five_distinct_random_pages(self):
+    def test_liked_tracks_select_up_to_five_distinct_random_pages(self):
         for total in (0, 1, 50, 51, 251, 1000):
             with self.subTest(total=total):
                 api = Spotify.__new__(Spotify)
@@ -1100,7 +1101,7 @@ class SpotifyTests(unittest.TestCase):
                 self.assertLessEqual(len(result), 250)
                 self.assertLessEqual(len(requests_seen), 6)
 
-    def test_sample_is_cached_for_the_day_and_refreshed_the_next_day(self):
+    def test_random_liked_tracks_are_cached_for_the_day_and_refreshed_the_next_day(self):
         with tempfile.TemporaryDirectory() as directory:
             api = Spotify.__new__(Spotify)
             api.store = Store(os.path.join(directory, "cache.sqlite"))
@@ -1123,7 +1124,7 @@ class SpotifyTests(unittest.TestCase):
                 self.assertNotEqual(first, next_day)
                 self.assertEqual(api.get.call_count, 12)
 
-    def test_failed_sample_does_not_cache_partial_results(self):
+    def test_failed_liked_track_fetch_does_not_cache_partial_results(self):
         with tempfile.TemporaryDirectory() as directory:
             api = Spotify.__new__(Spotify)
             api.store = Store(os.path.join(directory, "cache.sqlite"))
@@ -1145,7 +1146,7 @@ class SpotifyTests(unittest.TestCase):
         with self.assertRaisesRegex(SpotifyError, "inconsistent"):
             api.liked_tracks(random.Random(1))
         api.get = Mock(side_effect=[{"total": 100, "items": list(range(50))}, {"items": []}])
-        with self.assertRaisesRegex(SpotifyError, "sampled liked-track page"):
+        with self.assertRaisesRegex(SpotifyError, "randomly chosen liked-track page"):
             api.liked_tracks(random.Random(1))
 
     def test_partial_sources_are_used_without_caching_and_target_reads_remain_strict(self):

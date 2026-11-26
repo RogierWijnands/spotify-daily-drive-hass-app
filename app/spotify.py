@@ -192,7 +192,7 @@ class Spotify:
         return result
 
     def liked_tracks(self, rng):
-        # Fetch the first page with the total so it can also be used if sampled.
+        # Fetch the first page with the total so it can also be used if randomly chosen.
         first = self.get("/me/tracks", market="NL", limit=50, offset=0)
         if not isinstance(first, dict):
             raise SpotifyError("Spotify returned an invalid liked-track page")
@@ -212,7 +212,7 @@ class Spotify:
                 response = first if page == 0 else self.get("/me/tracks", market="NL", limit=50, offset=page * 50)
                 if not isinstance(response, dict) or not isinstance(response.get("items"), list) \
                         or not response["items"]:
-                    raise SpotifyError("Spotify returned an invalid sampled liked-track page")
+                    raise SpotifyError("Spotify returned an invalid randomly chosen liked-track page")
                 result.extend(response["items"])
         except (SpotifyError, requests.RequestException) as exc:
             if result:

@@ -247,7 +247,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
         indices = rng.sample(range(total), min(total, 2))
         combined = {}
 
-        # Fetch nearby sampled positions together without changing their random selection.
+        # Fetch nearby randomly chosen positions together without changing the selection.
         if len(indices) == 2 and min(indices) >= len(page["items"]) and max(indices) - min(indices) < 10:
             offset = min(indices)
             limit = max(indices) - offset + 1
@@ -274,7 +274,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                     selected = api.get(path, **params, limit=1, offset=index)
                     if not isinstance(selected, dict) or not isinstance(selected.get("items"), list) \
                             or len(selected["items"]) != 1:
-                        raise SpotifyError("Spotify returned an invalid sampled artist release")
+                        raise SpotifyError("Spotify returned an invalid randomly chosen artist release")
                     album = selected["items"][0]
 
                 if not isinstance(album, dict) or not isinstance(album.get("id"), str) or not album["id"]:
@@ -333,7 +333,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                   else str(artist_id) for artist_id in collaborator_ids[:4]]
         trace.append("Collaborators searched: "
                      + (", ".join(labels) if labels else "none")
-                     + "; up to two available releases per searched artist were sampled randomly.")
+                     + "; up to two available releases per searched artist were randomly chosen.")
 
     # Search up to four collaborators, without following further collaborations.
     for artist_id in collaborator_ids[:4]:
