@@ -1,6 +1,10 @@
 import logging
 import threading
 
+from .constants import (
+    DAILY_DRIVE_SOURCE_PLAYLIST_ERROR, MAX_PLAYLIST_ITEMS_ERROR,
+    MAX_SPOTIFY_PLAYLIST_ITEMS, HISTORY_STATUS_FAILED, HISTORY_STATUS_UNCERTAIN,
+)
 from .selection import build
 from .spotify import Spotify, SpotifyError, SpotifyRateLimitError
 from .store import selection_details
@@ -24,10 +28,16 @@ class Refresh:
             self.store.resolve(True, "Confirmed afterwards; " + pending["detail"])
             return True
         elif actual == pending["before_items"]:
-            self.store.resolve(False, "Spotify change was not applied" + selection_details(pending["detail"]))
+            self.store.resolve(
+                False,
+                "Spotify change was not applied" + selection_details(pending["detail"]),
+            )
             return False
         else:
-            raise SpotifyError("Previous change has an uncertain outcome; check and restore the playlist manually")
+            raise SpotifyError(
+                "Previous change has an uncertain outcome; "
+                "check and restore the playlist manually"
+            )
 
     def run(self, scheduled_key=None):
         # Prevent manual and scheduled refreshes from replacing the playlist at once.
@@ -50,7 +60,7 @@ class Refresh:
                 raise SpotifyError("Configure the Daily Drive playlist first")
             source_ids = self.store.get("source_ids", [])
             if pid in source_ids:
-                raise SpotifyError("Daily Drive cannot also be a music source")
+                raise SpotifyError(DAILY_DRIVE_SOURCE_PLAYLIST_ERROR)
 
             # Build the complete replacement before making any playlist changes.
             before = api.playlist_items(pid)
@@ -58,8 +68,10 @@ class Refresh:
                 api, source_ids, self.store.get("news_shows", []),
                 self.store.get("podcast_shows", []),
             )
-            if len(after) > 100:
-                raise SpotifyError("Spotify allows at most 100 items per replacement")
+            if len(after) > MAX_SPOTIFY_PLAYLIST_ITEMS:
+                raise SpotifyError(
+                    MAX_PLAYLIST_ITEMS_ERROR.format(max_items=MAX_SPOTIFY_PLAYLIST_ITEMS)
+                )
 
             # Report repeated episodes without excluding the latest available ones.
             previously_used = self.store.used_episodes()
@@ -77,7 +89,9 @@ class Refresh:
                     confirmed = self.reconcile(api)
                 except Exception as check_error:
                     if isinstance(exc, SpotifyRateLimitError):
-                        raise SpotifyError(f"{exc}; playlist verification failed: {check_error}") from check_error
+                        raise SpotifyError(
+                            f"{exc}; playlist verification failed: {check_error}"
+                        ) from check_error
                     raise
                 if confirmed:
                     return
@@ -90,7 +104,10 @@ class Refresh:
             log.exception("Daily Drive refresh failed")
             if history_id is not None:
                 # A pending write means the actual playlist contents are still unknown.
-                status = "uncertain" if self.store.pending() else "failed"
+                status = (
+                    HISTORY_STATUS_UNCERTAIN
+                    if self.store.pending() else HISTORY_STATUS_FAILED
+                )
                 error = str(exc)
                 if detail:
                     error += selection_details(detail)

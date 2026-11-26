@@ -8,6 +8,12 @@ from pathlib import Path
 
 from requests import RequestException
 
+from .constants import (
+    DAILY_DRIVE_SOURCE_PLAYLIST_ERROR, MAX_PLAYLIST_ITEMS_ERROR,
+    MAX_SPOTIFY_PLAYLIST_ITEMS, MILLISECONDS_PER_SECOND, MISSING_SPOTIFY_REFRESH_TOKEN_ERROR,
+    NO_UNCERTAIN_CHANGE_ERROR, PREVIOUS_CHANGE_OUTCOME_UNKNOWN_MESSAGE, SECONDS_PER_MINUTE,
+    SPOTIFY_CLIENT_ID_LENGTH,
+)
 from .refresh import Refresh
 from .selection import build_items
 from .shows import validate_shows
@@ -24,18 +30,29 @@ def read_config(path):
         raise ValueError("Configuration must be a JSON object")
 
     client_id = config.get("client_id")
-    if not isinstance(client_id, str) or len(client_id) != 32 or not client_id.isascii() or not client_id.isalnum():
-        raise ValueError("client_id must be a Spotify client ID of 32 letters or digits")
+    if (
+        not isinstance(client_id, str)
+        or len(client_id) != SPOTIFY_CLIENT_ID_LENGTH
+        or not client_id.isascii()
+        or not client_id.isalnum()
+    ):
+        raise ValueError(
+            f"client_id must be a Spotify client ID of {SPOTIFY_CLIENT_ID_LENGTH} letters or digits"
+        )
     target = config.get("playlist")
     sources = config.get("source_playlists", [])
-    if not isinstance(target, str) or not isinstance(sources, list) or not all(isinstance(s, str) for s in sources):
+    if (
+        not isinstance(target, str)
+        or not isinstance(sources, list)
+        or not all(isinstance(source, str) for source in sources)
+    ):
         raise ValueError("playlist must be a URL or ID and source_playlists a list of URLs or IDs")
 
     # Normalize URLs to IDs and remove duplicate source playlists.
     target_id = playlist_id(target)
     source_ids = list(dict.fromkeys(playlist_id(source) for source in sources))
     if target_id in source_ids:
-        raise ValueError("Daily Drive cannot also be a music source")
+        raise ValueError(DAILY_DRIVE_SOURCE_PLAYLIST_ERROR)
     news, podcasts = validate_shows(config.get("news_shows", []), config.get("podcast_shows", []))
     return client_id, target_id, source_ids, news, podcasts
 
@@ -52,7 +69,7 @@ def connect_spotify(store, client_id):
         "code": code, "redirect_uri": REDIRECT_URI, "code_verifier": verifier,
     })
     if not token.get("refresh_token"):
-        raise SpotifyError("Spotify did not return a refresh token")
+        raise SpotifyError(MISSING_SPOTIFY_REFRESH_TOKEN_ERROR)
     store.set_many({"refresh_token": token["refresh_token"]}, clear_cache=True)
     print("Spotify is connected.")
 
@@ -65,21 +82,32 @@ def preview(store):
         api, store.get("source_ids", []), store.get("news_shows", []),
         store.get("podcast_shows", []),
     )
-    if len(items) > 100:
-        raise SpotifyError("Spotify allows at most 100 items per replacement")
+    if len(items) > MAX_SPOTIFY_PLAYLIST_ITEMS:
+        raise SpotifyError(
+            MAX_PLAYLIST_ITEMS_ERROR.format(max_items=MAX_SPOTIFY_PLAYLIST_ITEMS)
+        )
+
     print("Dry run: the Spotify playlist was not changed.")
     print(detail)
 
     for index, item in enumerate(items, 1):
-        artists = ", ".join(artist["name"] for artist in item.get("artists", []) if artist.get("name"))
+        artists = ", ".join(
+            artist["name"] for artist in item.get("artists", []) if artist.get("name")
+        )
         title = item.get("name") or item["uri"]
         label = f"{artists} - {title}" if artists else title
-        duration = item["duration_ms"] // 1000
-        print(f"{index:2}. [{duration // 60}:{duration % 60:02}] {label} ({item['uri']})")
+        duration = item["duration_ms"] // MILLISECONDS_PER_SECOND
+        print(
+            f"{index:2}. "
+            f"[{duration // SECONDS_PER_MINUTE}:{duration % SECONDS_PER_MINUTE:02}] "
+            f"{label} ({item['uri']})"
+        )
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Test or refresh Daily Drive without Home Assistant.")
+    parser = argparse.ArgumentParser(
+        description="Test or refresh Daily Drive without Home Assistant."
+    )
     parser.add_argument(
         "--config", type=Path, default=Path("local-config.json"),
         help="JSON configuration (default: local-config.json)",
@@ -88,7 +116,9 @@ def main(argv=None):
     mode.add_argument("--authorize", action="store_true", help="Connect Spotify and exit")
     mode.add_argument("--apply", action="store_true", help="Replace the actual Spotify playlist")
     mode.add_argument("--pending", action="store_true", help="Show an uncertain playlist change")
-    mode.add_argument("--release-pending", action="store_true", help="Manually release an uncertain change")
+    mode.add_argument(
+        "--release-pending", action="store_true", help="Manually release an uncertain change"
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -99,7 +129,9 @@ def main(argv=None):
 
         # A pending playlist write must be reconciled with the original account.
         if client_id != store.get("client_id") and store.pending():
-            raise SpotifyError("An uncertain playlist change is still pending; use the original client ID first")
+            raise SpotifyError(
+                "An uncertain playlist change is still pending; use the original client ID first"
+            )
 
         # A new client ID requires a fresh Spotify connection and library cache.
         values = {
@@ -125,12 +157,12 @@ def main(argv=None):
                 print("\n".join(pending["after_items"]) or "(empty)")
         elif args.release_pending:
             if not store.pending():
-                raise ValueError("There is no uncertain change")
+                raise ValueError(NO_UNCERTAIN_CHANGE_ERROR)
             print("Check the playlist in Spotify. The previous outcome remains unknown.")
             if input("Type 'CONFIRM' to release the block: ") != "CONFIRM":
                 raise ValueError("Block not released")
             store.release_pending()
-            print("Block released; the previous outcome remains unknown.")
+            print(PREVIOUS_CHANGE_OUTCOME_UNKNOWN_MESSAGE)
         elif args.apply:
             Refresh(store).run()
         else:

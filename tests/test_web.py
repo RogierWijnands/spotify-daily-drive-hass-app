@@ -71,6 +71,33 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"HTTP 429", response.data)
         self.assertIn(b"Retry-After: &#39;45&#39;", response.data)
 
+    def test_history_links_zero_result_errors_to_source_warnings(self):
+        entry = {
+            "started": "2026-01-01",
+            "status": "succeeded",
+            "detail": (
+                "90 minutes\nSelection:\n"
+                "Top tracks short term: Spotify fetch failed; no data retrieved from cache; "
+                "0 results because the fetch failed.\n"
+                "News show bulletin: 0/1 requested episodes selected, using available playable episodes "
+                "and excluding duplicates. 0 episodes selected because Spotify requests failed.\n"
+                "Source warning: Skipping short-term top tracks: Spotify unavailable\n"
+                "Source warning: Failed to fetch remaining episodes for show bulletin: Spotify unavailable"
+            ),
+        }
+        with patch.object(web.store, "history", return_value=[entry]):
+            response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(
+            b'<a href="#history-0-error-2">0 results because the fetch failed</a>',
+            response.data,
+        )
+        self.assertIn(
+            b'<a href="#history-0-error-3">0 episodes selected because Spotify requests failed</a>',
+            response.data,
+        )
+        self.assertIn(b'id="history-0-error-2"', response.data)
+        self.assertIn(b'id="history-0-error-3"', response.data)
+
     def test_history_expands_tracks_and_keeps_old_details_readable(self):
         store = self.isolated_store()
         store.finish(store.start(), "failed", "Old error message")

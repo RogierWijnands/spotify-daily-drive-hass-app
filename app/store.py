@@ -4,10 +4,20 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
+from .constants import (
+    CACHE_KEY_SUFFIX, DATABASE_CONNECTION_TIMEOUT_SECONDS, FOLLOWED_ARTISTS_CACHE_KEY,
+    HISTORY_ENTRY_LIMIT, HISTORY_STATUS_FAILED, HISTORY_STATUS_IN_PROGRESS,
+    HISTORY_STATUS_SUCCEEDED, HISTORY_STATUS_UNCERTAIN, ITEMS_DETAIL_SEPARATOR,
+    NO_UNCERTAIN_CHANGE_ERROR,
+    SELECTION_DETAIL_SEPARATOR, SHOW_EPISODE_CACHE_PREFIX,
+)
+
 
 def selection_details(detail):
-    _, separator, selection = detail.partition("\nSelection:\n")
-    return "\nSelection:\n" + selection.partition("\nItems:\n")[0] if separator else ""
+    _, separator, selection = detail.partition(SELECTION_DETAIL_SEPARATOR)
+    if not separator:
+        return ""
+    return SELECTION_DETAIL_SEPARATOR + selection.partition(ITEMS_DETAIL_SEPARATOR)[0]
 
 
 class Store:
@@ -34,23 +44,38 @@ class Store:
                     key TEXT PRIMARY KEY, day TEXT NOT NULL, value TEXT NOT NULL
                 );
             """)
-            # Only a persisted pending write can have reached Spotify before a restart.
-            db.execute("""
-                UPDATE history SET status='failed', detail='App stopped before replacing the playlist'
-                WHERE status='in_progress' AND id NOT IN (SELECT history_id FROM pending)
-            """)
+            # Only a persisted pending write could have reached Spotify before a restart.
+            db.execute(
+                """
+                UPDATE history SET status=?, detail=?
+                WHERE status=? AND id NOT IN (SELECT history_id FROM pending)
+                """,
+                (
+                    HISTORY_STATUS_FAILED,
+                    "App stopped before replacing the playlist",
+                    HISTORY_STATUS_IN_PROGRESS,
+                ),
+            )
             pending = db.execute("SELECT history_id, detail FROM pending").fetchone()
             if pending:
-                db.execute("""
-                    UPDATE history SET status='uncertain', detail=?
-                    WHERE status='in_progress' AND id=?
-                """, ("App stopped during playlist replacement" + selection_details(pending["detail"]),
-                      pending["history_id"]))
+                db.execute(
+                    """
+                    UPDATE history SET status=?, detail=?
+                    WHERE status=? AND id=?
+                    """,
+                    (
+                        HISTORY_STATUS_UNCERTAIN,
+                        "App stopped during playlist replacement"
+                        + selection_details(pending["detail"]),
+                        HISTORY_STATUS_IN_PROGRESS,
+                        pending["history_id"],
+                    ),
+                )
         os.chmod(path, 0o600)
 
     @contextmanager
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=30)
+        db = sqlite3.connect(self.path, timeout=DATABASE_CONNECTION_TIMEOUT_SECONDS)
         db.row_factory = sqlite3.Row
         try:
             # Commit successful operations and roll back if an exception occurs.
@@ -69,7 +94,7 @@ class Store:
         with self.connect() as db:
             if clear_cache:
                 db.execute("DELETE FROM daily_cache")
-                db.execute("DELETE FROM settings WHERE key='followed_artists_cache'")
+                db.execute("DELETE FROM settings WHERE key=?", (FOLLOWED_ARTISTS_CACHE_KEY,))
             db.executemany(
                 "INSERT OR REPLACE INTO settings VALUES (?, ?)",
                 [(k, json.dumps(v)) for k, v in values.items()],
@@ -78,13 +103,20 @@ class Store:
     def get_cached(self, key, day):
         # Episodes are usable only on their fetch day; music can serve as an older fallback.
         with self.connect() as db:
-            db.execute("DELETE FROM daily_cache WHERE day != ? AND key GLOB 'show_episodes_*_cache'", (day,))
-            row = db.execute("SELECT value FROM daily_cache WHERE key=? AND day=?", (key, day)).fetchone()
+            db.execute(
+                "DELETE FROM daily_cache WHERE day != ? AND key GLOB ?",
+                (day, f"{SHOW_EPISODE_CACHE_PREFIX}*{CACHE_KEY_SUFFIX}"),
+            )
+            row = db.execute(
+                "SELECT value FROM daily_cache WHERE key=? AND day=?", (key, day)
+            ).fetchone()
         return json.loads(row["value"]) if row else None
 
     def get_previous_cached(self, key, day):
         with self.connect() as db:
-            row = db.execute("SELECT day, value FROM daily_cache WHERE key=? AND day<?", (key, day)).fetchone()
+            row = db.execute(
+                "SELECT day, value FROM daily_cache WHERE key=? AND day<?", (key, day)
+            ).fetchone()
         return (row["day"], json.loads(row["value"])) if row else None
 
     def set_cached(self, key, day, value):
@@ -101,7 +133,7 @@ class Store:
             if db.execute("SELECT 1 FROM pending LIMIT 1").fetchone():
                 raise ValueError("Resolve the uncertain playlist change before clearing data")
             db.execute("DELETE FROM daily_cache")
-            db.execute("DELETE FROM settings WHERE key='followed_artists_cache'")
+            db.execute("DELETE FROM settings WHERE key=?", (FOLLOWED_ARTISTS_CACHE_KEY,))
             db.execute("DELETE FROM episodes")
             db.execute("DELETE FROM history")
 
@@ -111,10 +143,12 @@ class Store:
             db.execute("VACUUM")
 
     def history(self):
-        # The web UI shows the latest 20 entries; older entries remain in SQLite.
+        # Keep older entries in SQLite; the web UI only needs the most recent ones.
         with self.connect() as db:
             return [dict(row) for row in db.execute(
-                "SELECT started, status, detail FROM history ORDER BY id DESC LIMIT 20")]
+                "SELECT started, status, detail FROM history ORDER BY id DESC LIMIT ?",
+                (HISTORY_ENTRY_LIMIT,),
+            )]
 
     def start(self, scheduled_key=None):
         now = datetime.now(timezone.utc).isoformat()
@@ -124,7 +158,7 @@ class Store:
             try:
                 cursor = db.execute(
                     "INSERT INTO history (started,status,detail,scheduled_key) VALUES (?,?,?,?)",
-                    (now, "in_progress", "", scheduled_key),
+                    (now, HISTORY_STATUS_IN_PROGRESS, "", scheduled_key),
                 )
             except sqlite3.IntegrityError:
                 # The unique scheduled key prevents multiple runs in the same minute.
@@ -133,7 +167,9 @@ class Store:
 
     def finish(self, history_id, status, detail):
         with self.connect() as db:
-            db.execute("UPDATE history SET status=?,detail=? WHERE id=?", (status, detail, history_id))
+            db.execute(
+                "UPDATE history SET status=?,detail=? WHERE id=?", (status, detail, history_id)
+            )
 
     def used_episodes(self):
         with self.connect() as db:
@@ -175,7 +211,7 @@ class Store:
                 )
             db.execute(
                 "UPDATE history SET status=?,detail=? WHERE id=?",
-                ("succeeded" if success else "failed",
+                (HISTORY_STATUS_SUCCEEDED if success else HISTORY_STATUS_FAILED,
                  detail or row["detail"], row["history_id"]),
             )
             db.execute("DELETE FROM pending WHERE id=1")
@@ -185,11 +221,14 @@ class Store:
         with self.connect() as db:
             row = db.execute("SELECT history_id, detail FROM pending WHERE id=1").fetchone()
             if not row:
-                raise ValueError("There is no uncertain change")
+                raise ValueError(NO_UNCERTAIN_CHANGE_ERROR)
 
             db.execute(
                 "UPDATE history SET status=?,detail=? WHERE id=?",
-                ("uncertain", "Manually released; outcome not determined" + selection_details(row["detail"]),
-                 row["history_id"]),
+                (
+                    HISTORY_STATUS_UNCERTAIN,
+                    "Manually released; outcome not determined" + selection_details(row["detail"]),
+                    row["history_id"],
+                ),
             )
             db.execute("DELETE FROM pending WHERE id=1")

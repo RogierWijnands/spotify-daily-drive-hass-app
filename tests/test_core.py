@@ -245,6 +245,8 @@ class SelectionTests(unittest.TestCase):
                 with self.assertLogs("app.selection", level="WARNING"):
                     self.assertEqual(podcast_candidates(api, news, podcasts, trace=trace), [])
                 self.assertIn("No episodes from today's cache were available.", "\n".join(trace))
+                self.assertIn("0/2 requested episodes selected", trace[0])
+                self.assertIn("0 episodes selected because Spotify requests failed.", trace[0])
                 self.assertEqual(api.calls.count("/shows/news/episodes"), 4)
                 self.assertEqual(api.calls.count("/shows/podcast/episodes"), 4)
 
@@ -744,8 +746,15 @@ class SelectionTests(unittest.TestCase):
             def pages(self, path, params, max_items=1000):
                 return []
 
-            def followed_artists(self):
+            def followed_artists(self, trace=None):
                 return []
+
+        trace, issues = [], []
+        with self.assertLogs("app.selection", level="WARNING"):
+            music_candidates(Fake(), [], random.Random(1), issues, trace)
+        self.assertIn("Release track lists: 0 reused from this refresh's cache; "
+                      "0 retrieved from Spotify during this refresh; "
+                      "0 retrieved because artist release requests failed.", trace)
 
         with self.assertLogs("app.selection", level="WARNING"):
             with self.assertRaisesRegex(SpotifyError, "No suitable music found"):
@@ -972,7 +981,7 @@ class SelectionTests(unittest.TestCase):
             for term in ("short", "medium", "long"):
                 self.assertIn(f"Top tracks {term} term: retrieved from today's cache.", saved)
             self.assertIn("Recently played tracks: retrieved from today's cache.", saved)
-            self.assertRegex(saved, r"Top artists (short|medium|long) term: retrieved from today's cache\.")
+            self.assertRegex(saved, r"Top artists (short|medium|long) term: retrieved from today's cache;")
 
     def test_top_and_recent_tracks_and_top_artists_are_cached_per_day(self):
         class FixedRange(random.Random):
@@ -1037,11 +1046,17 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(sum(path == "/me/player/recently-played" for path, _ in api.calls), 2)
             self.assertIn("Top tracks short term: retrieved from Spotify and saved in today's cache.", traces[0])
             self.assertIn("Top tracks short term: retrieved from today's cache.", traces[1])
-            self.assertIn("Top artists short term: retrieved from today's cache.", traces[1])
-            self.assertIn("Top artist time range: short_term; chosen randomly for today.", traces[0])
-            self.assertIn("Top artist time range: short_term; reused from today's cache.", traces[2])
-            self.assertIn("Top artist time range: medium_term; chosen randomly for today.", traces[4])
-            self.assertIn("Top artists medium term: retrieved from Spotify and saved in today's cache.", traces[4])
+            self.assertTrue(any(line.startswith("Top artists short term: retrieved from today's cache;")
+                                for line in traces[1]))
+            self.assertTrue(any("Top artists short term: retrieved from Spotify and saved in today's cache; "
+                                "time range chosen randomly for today;" in line for line in traces[0]))
+            self.assertTrue(any("Top artists short term: retrieved from today's cache; "
+                                "time range reused from today's cache;" in line for line in traces[2]))
+            self.assertTrue(any("Top artists medium term: retrieved from Spotify and saved in today's cache; "
+                                "time range chosen randomly for today;" in line for line in traces[4]))
+            self.assertTrue(any(line.startswith(
+                "Top artists medium term: retrieved from Spotify and saved in today's cache;"
+            ) for line in traces[4]))
             self.assertIn("Recently played tracks: retrieved from Spotify and saved in today's cache.", traces[0])
             self.assertIn("Recently played tracks: retrieved from today's cache.", traces[1])
             self.assertIn("Recently played tracks: retrieved from Spotify and saved in today's cache.", traces[4])
@@ -1112,7 +1127,8 @@ class SelectionTests(unittest.TestCase):
             self.assertIn("invalid item list", "\n".join(issues))
             self.assertIn("Retry-After: '45'", "\n".join(issues))
             self.assertIn("recent unavailable", "\n".join(issues))
-            self.assertIn("Recently played tracks: Spotify fetch failed; no data retrieved from cache.", trace)
+            self.assertIn("Recently played tracks: Spotify fetch failed; no data retrieved from cache; "
+                          "0 results because the fetch failed.", trace)
             self.assertIsNone(api.store.get_cached("top_tracks_short_term_cache", day))
             self.assertIsNone(api.store.get_cached("top_artists_short_term_cache", day))
             self.assertIsNone(api.store.get_cached("recently_played_tracks_cache", day))
@@ -1127,7 +1143,8 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(api.store.get_cached("top_artists_short_term_cache", day), [])
             self.assertEqual(api.store.get_cached("recently_played_tracks_cache", day), [])
             self.assertIn("Top tracks short term: retrieved from Spotify and saved in today's cache.", trace)
-            self.assertIn("Top artists short term: retrieved from Spotify and saved in today's cache.", trace)
+            self.assertTrue(any(line.startswith("Top artists short term: retrieved from Spotify and saved in today's cache;")
+                                for line in trace))
             self.assertIn("Recently played tracks: retrieved from Spotify and saved in today's cache.", trace)
 
     def test_failed_music_sources_use_older_cache_and_report_current_errors(self):
@@ -1176,8 +1193,15 @@ class SelectionTests(unittest.TestCase):
                 self.assertIn("3", [item["id"] for item in groups[0]])
                 self.assertEqual(len(groups[4]), 25)
                 for label in ("Top tracks short term", "Top tracks medium term", "Top tracks long term",
-                              "Top artists short term", "Recently played tracks", "Liked tracks"):
+                              "Recently played tracks", "Liked tracks"):
                     self.assertIn(f"{label}: Spotify fetch failed; reused cache from {old_day}.", trace)
+                self.assertTrue(any(line.startswith(
+                    f"Top artists short term: Spotify fetch failed; reused cache from {old_day};"
+                ) for line in trace))
+                self.assertTrue(any("0 results because the fetch failed" in line for line in trace
+                                    if line.startswith("Top artists short term:")))
+                self.assertTrue(any("artist source errors prevented discovery." in line for line in trace
+                                    if line.startswith("Top artists short term:")))
                 self.assertIn("Retry-After: '32'", "\n".join(issues))
                 self.assertIn("Liked tracks unavailable", "\n".join(issues))
                 self.assertIsNone(api.store.get_cached("liked_tracks_cache", "2026-01-16"))
@@ -1519,12 +1543,22 @@ class SpotifyTests(unittest.TestCase):
             api.get = Mock(side_effect=SpotifyError("unavailable"))
             with patch("app.spotify.datetime") as clock:
                 clock.now.return_value = datetime(2026, 1, 15, tzinfo=timezone.utc)
-                for _ in range(5):
+                trace = []
+                with self.assertRaisesRegex(SpotifyError, "unavailable"):
+                    api.followed_artists(trace)
+                self.assertIn("0 retrieved from Spotify during this refresh; "
+                              "no artists available because a Spotify request failed; "
+                              "Spotify was queried during this refresh.", trace[0])
+                for _ in range(4):
                     with self.assertRaisesRegex(SpotifyError, "unavailable"):
                         api.followed_artists()
                 trace = []
                 self.assertEqual(api.followed_artists(trace), [])
-                self.assertIn("Followed-artist daily limit of 5 requests reached; no new Spotify request.", trace)
+                self.assertEqual(trace, [
+                    "Followed artists: 0 reused from cache; 0 retrieved from Spotify during this refresh; "
+                    "daily request limit of 5 reached; no new Spotify request; no artists available; "
+                    "no Spotify request was made during this refresh."
+                ])
                 self.assertEqual(api.get.call_count, 5)
                 clock.now.return_value = datetime(2026, 1, 16, tzinfo=timezone.utc)
                 with self.assertRaisesRegex(SpotifyError, "unavailable"):
@@ -1558,9 +1592,10 @@ class SpotifyTests(unittest.TestCase):
                     issues = []
                     artists = get_api_items("followed artists", lambda: api.followed_artists(trace), issues)
                     self.assertEqual(len(artists), 4)
-                    self.assertIn("Followed artists: 4 reused from cache; 0 retrieved from Spotify during this refresh.",
-                                  trace)
-                    self.assertIn("Followed-artist daily limit of 5 requests reached; no new Spotify request.", trace)
+                    self.assertEqual(trace, [
+                        "Followed artists: 4 reused from cache; 0 retrieved from Spotify during this refresh; "
+                        "daily request limit of 5 reached; no new Spotify request."
+                    ])
                     self.assertEqual(issues, [])
                     self.assertNotIn("Retry-After", "\n".join(trace))
                 self.assertEqual(api.get.call_count, 5)
@@ -1733,9 +1768,10 @@ class RefreshTests(unittest.TestCase):
             self.assertIn(f"{label}: retrieved from today's cache.", second["detail"])
         self.assertRegex(first["detail"], r"Top artists (short|medium|long) term: retrieved from Spotify")
         self.assertRegex(second["detail"], r"Top artists (short|medium|long) term: retrieved from (today's cache|Spotify)")
-        self.assertIn("Followed artists: no artists available; Spotify was queried during this refresh.", first["detail"])
-        self.assertIn("Followed artists: no artists available; no Spotify request was made during this refresh.",
-                      second["detail"])
+        self.assertIn("Followed artists: 0 reused from cache; 0 retrieved from Spotify during this refresh; "
+                      "no artists available; Spotify was queried during this refresh.", first["detail"])
+        self.assertIn("Followed artists: 0 reused from cache; 0 retrieved from Spotify during this refresh; "
+                      "no artists available; no Spotify request was made during this refresh.", second["detail"])
 
     def test_uncertain_write_preserves_cache_origins_in_history(self):
         api = Mock()
@@ -1935,7 +1971,9 @@ class RefreshTests(unittest.TestCase):
         entry = self.store.history()[0]
         self.assertEqual(entry["status"], "succeeded")
         self.assertIn("Source warning: Skipping short-term top tracks", entry["detail"])
-        self.assertIn("Top tracks short term: Spotify fetch failed; no data retrieved from cache.", entry["detail"])
+        self.assertIn("Top tracks short term: Spotify fetch failed; no data retrieved from cache; "
+                      "0 results because the fetch failed.", entry["detail"])
+        self.assertIn("current and recent: 0 (no candidates because source retrieval failed)", entry["detail"])
         self.assertIn("Message: Quota exceeded; Reason: QUOTA_EXCEEDED; Retry-After: '45'", entry["detail"])
 
     def test_skipped_rate_limit_is_recorded_if_selection_fails(self):

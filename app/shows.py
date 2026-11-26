@@ -1,3 +1,4 @@
+from .constants import MAX_CONFIGURED_SHOW_EPISODES
 from .spotify import show_id
 
 
@@ -14,7 +15,9 @@ def validate_shows(news, podcasts):
         validated = []
         for entry in group:
             if not isinstance(entry, dict) or not isinstance(entry.get("show"), str):
-                raise ValueError("Each show must have a Spotify show URL or ID and an episode count")
+                raise ValueError(
+                    "Each show must have a Spotify show URL or ID and an episode count"
+                )
 
             # Reject booleans as well as non-integer or non-positive counts.
             count = entry.get("count")
@@ -29,9 +32,11 @@ def validate_shows(news, podcasts):
             validated.append({"show": sid, "count": count})
         result.append(validated)
 
-    # Spotify allows at most 100 playlist items; reserve one for music.
-    if total > 99:
-        raise ValueError("Configure at most 99 episodes to leave room for music")
+    # Reserve one playlist item for music.
+    if total > MAX_CONFIGURED_SHOW_EPISODES:
+        raise ValueError(
+            f"Configure at most {MAX_CONFIGURED_SHOW_EPISODES} episodes to leave room for music"
+        )
     return result
 
 
@@ -45,10 +50,14 @@ def parse_show_lines(text):
 
         parts = line.rsplit(",", 1)
         if len(parts) != 2 or not parts[1].strip().isascii() or not parts[1].strip().isdigit():
-            raise ValueError("Enter each show as a Spotify show URL or ID, followed by a comma and episode count")
+            raise ValueError(
+                "Enter each show as a Spotify show URL or ID, followed by a comma and episode count"
+            )
         entries.append({"show": parts[0].strip(), "count": int(parts[1].strip())})
     return entries
 
 
 def format_show_lines(shows):
-    return "\n".join(f"https://open.spotify.com/show/{item['show']}, {item['count']}" for item in shows)
+    return "\n".join(
+        f"https://open.spotify.com/show/{item['show']}, {item['count']}" for item in shows
+    )
