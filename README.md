@@ -12,7 +12,7 @@ Spotify used to have Daily Drive, a playlist that combines your favorite music, 
 6. Select **Refresh now** and check the history and app log.
 
 - No Spotify client secret is needed.
-- Automatic refresh: **00:00, 04:00, 08:00, 12:00, 16:00, 20:00** (`Europe/Amsterdam`). The app must be running; missed times are not retried.
+- Automatic refresh: **06:00, 13:00, 19:00** (`Europe/Amsterdam`). The app must be running; missed times are not retried.
 - Updates: push the new version to GitHub, then select **Check for updates** in the app store. Local and repository installations have separate data.
 - Tokens, settings and history are stored privately in `/data/daily_drive.sqlite3`. Removing the app or its data can delete them.
 
