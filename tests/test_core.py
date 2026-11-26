@@ -62,8 +62,12 @@ class SelectionTests(unittest.TestCase):
 
     def test_duration_selection_can_skip_long_reserved_track(self):
         podcasts = [{"uri": "spotify:episode:1", "duration_ms": 89 * 60000}]
-        music = select_music([[track(1, 4)], [], [track(2, 1)]], podcasts, random.Random(1))
+        trace = []
+        music = select_music([[track(1, 4)], [], [track(2, 1)]], podcasts, random.Random(1), trace)
         self.assertEqual(music, [track(2, 1)])
+        self.assertIn("The first duration fit with reserved favorites failed; selection was retried without them.",
+                      trace)
+        self.assertIn("artist discoveries: 1", " ".join(trace))
 
     def test_duration_accepts_both_tolerance_boundaries(self):
         for podcast_minutes, total_minutes in ((84, 88), (88, 92)):
@@ -198,15 +202,17 @@ class SelectionTests(unittest.TestCase):
             def followed_artists(self):
                 raise SpotifyError("followed inaccessible")
 
+        trace = []
         with self.assertLogs("app.selection", level="WARNING") as logs:
             items, _, _ = build_items(Fake(), ["bad", "good"], [{"show": "bad", "count": 1}],
-                                      [], random.Random(1))
+                                      [], random.Random(1), trace)
         self.assertLessEqual(abs(sum(item["duration_ms"] for item in items) - 90 * 60000), 2 * 60000)
         messages = "\n".join(logs.output)
         for expected in ("Retry-After: '45'", "recent inaccessible", "likes inaccessible",
                          "artists inaccessible", "followed inaccessible", "track inaccessible",
                          "playlist inaccessible", "show inaccessible"):
             self.assertIn(expected, messages)
+            self.assertIn(expected, "\n".join(trace))
 
     def test_unavailable_candidates_do_not_hide_later_playable_tracks(self):
         class Fake(UncachedSpotify):
@@ -287,11 +293,20 @@ class SelectionTests(unittest.TestCase):
             def followed_artists(self):
                 return []
 
+        reference, _, _ = build_items(Fake(), ["source"], NEWS_SHOWS, PODCAST_SHOWS, random.Random(7))
         items, episodes, detail = build(Fake(), ["source"], NEWS_SHOWS, PODCAST_SHOWS, random.Random(7))
+        self.assertEqual(items, [item["uri"] for item in reference])
         self.assertEqual(len(episodes), 6)
         self.assertEqual(len(items), len(set(items)))
         self.assertTrue(set(episodes).issubset(items))
         self.assertIn("minutes", detail)
+        self.assertIn("News show news: 4/4 requested episodes selected", detail)
+        self.assertIn("Podcast show podcast1: 1/1 requested episodes selected", detail)
+        self.assertIn("Selected: spotify:episode:podcast1-0.", detail)
+        self.assertIn("Artists searched for discovery (not necessarily selected for the playlist): artist.", detail)
+        self.assertIn("Selected music by candidate group", detail)
+        self.assertIn("\nSelection:\n", detail)
+        self.assertIn("\nItems:\n", detail)
         self.assertLessEqual(abs((len(items) - 6) * 4 + 42 - 90), 2)
 
     def test_liked_tracks_are_filtered_and_can_fill_the_mix(self):
@@ -342,7 +357,9 @@ class SelectionTests(unittest.TestCase):
                     self.requested_artists.append((artist, params["include_groups"]))
                     return {"items": [{"id": artist, "release_date": "2026-01-01"}], "total": 1}
                 if path == "/albums/favorite/tracks":
-                    return {"items": [song("duet", ["favorite", "collaborator", "other-favorite"]),
+                    duet = song("duet", ["favorite", "collaborator", "other-favorite"])
+                    duet["artists"][1]["name"] = "Guest Artist"
+                    return {"items": [duet,
                                       song("duet-again", ["favorite", "collaborator"]),
                                       song("unrelated", ["not-a-collaborator"])]}
                 if path == "/albums/other-favorite/tracks":
@@ -362,13 +379,15 @@ class SelectionTests(unittest.TestCase):
                 return []
 
         api = Fake()
-        groups = music_candidates(api, [], random.Random(2))
+        trace = []
+        groups = music_candidates(api, [], random.Random(2), trace=trace)
         self.assertIn(api.top_artist_params["time_range"], ("short_term", "medium_term", "long_term"))
         self.assertEqual(api.top_artist_params["limit"], 50)
         self.assertCountEqual(api.requested_artists, [
             ("favorite", "album,single,appears_on"),
             ("other-favorite", "album,single,appears_on"),
             ("collaborator", "album,single")])
+        self.assertIn("Collaborators searched: Guest Artist (collaborator)", "\n".join(trace))
         self.assertEqual(len(groups[-1]), 25)
         self.assertTrue(all(item["is_playable"] for item in groups[-1]))
 
@@ -1084,14 +1103,20 @@ class RefreshTests(unittest.TestCase):
     def test_success_persists_selected_music_in_history(self):
         items = [{"uri": "spotify:track:1", "name": "Song", "artists": [{"name": "Artist"}]},
                  {"uri": "spotify:episode:1", "name": "Episode"}]
+
+        def fake_build_items(api, playlists, news, podcasts, rng, trace):
+            trace.append("News show: one episode selected.")
+            return items, ["spotify:episode:1"], "90 minutes"
+
         with patch("app.refresh.Spotify") as spotify, patch(
-                "app.selection.build_items", return_value=(items, ["spotify:episode:1"], "90 minutes")):
+                "app.selection.build_items", side_effect=fake_build_items):
             spotify.return_value.playlist_items.return_value = ["old"]
             self.service.run()
         spotify.return_value.replace.assert_called_once_with("target", [item["uri"] for item in items])
         entry = self.store.history()[0]
         self.assertEqual(entry["status"], "succeeded")
-        self.assertEqual(entry["detail"], "90 minutes; 1 music tracks\nItems:\n"
+        self.assertEqual(entry["detail"], "90 minutes; 1 music tracks\nSelection:\n"
+                                          "News show: one episode selected.\nItems:\n"
                                           "Artist - Song\n[Episode] Episode")
 
     def test_refresh_passes_configured_shows_to_selection(self):

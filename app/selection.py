@@ -50,14 +50,14 @@ def get_api_items(source, fetch, issues=None):
         return []
 
 
-def podcast_candidates(api, news_shows, podcast_shows, issues=None):
+def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
     news = []
     other_podcasts = []
     seen = set()
 
     # Read each show until its requested count is reached or there are no more pages.
     # Keep the episodes already found if a later page fails.
-    for shows, episodes in ((news_shows, news), (podcast_shows, other_podcasts)):
+    for category, shows, episodes in (("News", news_shows, news), ("Podcast", podcast_shows, other_podcasts)):
         for entry in shows:
             show, count = entry["show"], entry["count"]
             current = []
@@ -84,6 +84,15 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None):
             if len(current) != count:
                 api_warning(issues, "Show %s has %s of %s requested playable episodes", show, len(current), count)
             episodes.extend(current)
+            if trace is not None:
+                titles = [item["name"] if isinstance(item.get("name"), str) and item["name"].strip()
+                          else item["uri"] for item in current]
+                trace.append(f"{category} show {show}: {len(current)}/{count} requested episodes selected, "
+                             "using the latest playable episodes and excluding duplicates."
+                             + (f" Selected: {', '.join(titles)}." if titles else ""))
+
+    if trace is not None and not news_shows and not podcast_shows:
+        trace.append("No news or podcast shows configured.")
 
     # Alternate news and other podcasts; keep the remaining episodes from either list.
     return [
@@ -94,7 +103,7 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None):
     ]
 
 
-def music_candidates(api, playlist_ids, rng, issues=None):
+def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
     # Each source can fail independently without blocking the other sources.
     short_term_top_tracks = get_api_items("short-term top tracks",
                                           lambda: api.get("/me/top/tracks", time_range="short_term", limit=50), issues)
@@ -156,6 +165,16 @@ def music_candidates(api, playlist_ids, rng, issues=None):
     rng.shuffle(artists)
     discoveries = []
 
+    if trace is not None:
+        selected_names = [
+            artist["name"] if isinstance(artist.get("name"), str) and artist["name"].strip() else artist["id"]
+            for artist in artists[:8]
+        ]
+        trace.append(f"Top artist time range: {random_time_range}; {len(artists)} unique artists from top, "
+                     "followed and retrieved tracks, including source playlists, were shuffled.")
+        trace.append("Artists searched for discovery (not necessarily selected for the playlist): "
+                     + (", ".join(selected_names) if selected_names else "none") + ".")
+
     def artist_tracks(artist_id, include_groups):
         # Find music from one artist. include_groups determines which kinds of
         # releases to search, such as albums, singles, or appearances.
@@ -212,6 +231,7 @@ def music_candidates(api, playlist_ids, rng, issues=None):
 
     artist_ids = {artist["id"] for artist in artists}
     collaborators = set()
+    collaborator_names = {}
 
     # Search up to eight artists and collect collaborators from their shared tracks.
     for artist in artists[:8]:
@@ -226,10 +246,23 @@ def music_candidates(api, playlist_ids, rng, issues=None):
             }
             if artist["id"] in credited:
                 collaborators.update(credited - artist_ids)
+                if trace is not None:
+                    for credit in item.get("artists") or []:
+                        if isinstance(credit, dict) and credit.get("id") and credit["id"] in collaborators:
+                            name = credit.get("name")
+                            if isinstance(name, str) and name.strip():
+                                collaborator_names[credit["id"]] = name
 
     collaborator_ids = sorted(collaborators)
     rng.shuffle(collaborator_ids)
     collaborator_tracks = []
+
+    if trace is not None:
+        labels = [f"{collaborator_names[artist_id]} ({artist_id})" if artist_id in collaborator_names
+                  else str(artist_id) for artist_id in collaborator_ids[:4]]
+        trace.append("Collaborators searched: "
+                     + (", ".join(labels) if labels else "none")
+                     + "; up to two available releases per searched artist were sampled randomly.")
 
     # Search up to four collaborators, without following further collaborations.
     for artist_id in collaborator_ids[:4]:
@@ -278,10 +311,11 @@ def music_candidates(api, playlist_ids, rng, issues=None):
     return [playable(group) for group in groups]
 
 
-def select_music(groups, podcasts, rng):
+def select_music(groups, podcasts, rng, trace=None):
     chosen = []
     seen = {p["uri"] for p in podcasts}
     normalized = []
+    sources = {}
 
     # Deduplicate across groups before choosing so a track cannot occupy two slots.
     for group in groups:
@@ -289,6 +323,7 @@ def select_music(groups, podcasts, rng):
         for item in group:
             if item["uri"] not in seen:
                 seen.add(item["uri"])
+                sources[item["uri"]] = len(normalized)
                 pool.append(item)
         rng.shuffle(pool)
         normalized.append(pool)
@@ -332,11 +367,26 @@ def select_music(groups, podcasts, rng):
         return result if abs(duration - TARGET) <= TOLERANCE else None
 
     result = fit(chosen, remaining)
+    used_fallback = result is None and bool(chosen)
     if result is None and chosen:
         # The preferred current/older tracks must not block a viable playlist.
         result = fit([], chosen + remaining)
     if result is None:
         raise SpotifyError("Not enough suitable content to stay within 88-92 minutes")
+    if trace is not None:
+        group_names = ("current and recent", "older favorites", "artist discoveries",
+                       "source playlists", "liked tracks", "collaborators")
+        counts = [0] * len(groups)
+        for item in result:
+            counts[sources[item["uri"]]] += 1
+        breakdown = ", ".join(f"{name}: {count}" for name, count in zip(group_names, counts))
+        trace.append("Selected music by candidate group (duplicates credited to the first group): " + breakdown + ".")
+        if used_fallback:
+            trace.append("The first duration fit with reserved favorites failed; selection was retried without them.")
+        else:
+            trace.append(f"{len(chosen)} available current/older favorites were reserved before duration fitting.")
+        trace.append("Music was selected with the episodes to fit 90 minutes within 2 minutes and 100 items; "
+                     "episodes were spread through the music.")
     return result
 
 
@@ -357,15 +407,15 @@ def interleave(music, podcasts, rng):
     return output
 
 
-def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None):
+def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None, trace=None):
     rng = rng or random.SystemRandom()
     issues = []
 
     # Gather candidates before selecting anything or changing the Spotify playlist.
-    podcasts = podcast_candidates(api, news_shows, podcast_shows, issues)
-    groups = music_candidates(api, playlist_ids, rng, issues)
+    podcasts = podcast_candidates(api, news_shows, podcast_shows, issues, trace)
+    groups = music_candidates(api, playlist_ids, rng, issues, trace)
     try:
-        music = select_music(groups, podcasts, rng)
+        music = select_music(groups, podcasts, rng, trace)
     except SpotifyError as exc:
         if issues:
             # Include a rate limit and a few source errors when the final selection fails.
@@ -377,13 +427,18 @@ def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None):
     total = sum(item["duration_ms"] for item in result)
     podcast_total = sum(item["duration_ms"] for item in podcasts)
     detail = f"{total / 60000:.1f} minutes; podcasts {podcast_total / total * 100:.1f}%"
+    if trace is not None:
+        trace.extend(f"Source warning: {issue}" for issue in issues)
     return result, [item["uri"] for item in podcasts], detail
 
 
 def build(api, playlist_ids, news_shows, podcast_shows, rng=None):
-    items, episodes, detail = build_items(api, playlist_ids, news_shows, podcast_shows, rng)
+    trace = []
+    items, episodes, detail = build_items(api, playlist_ids, news_shows, podcast_shows, rng, trace)
     episode_uris = set(episodes)
     detail += f"; {sum(item['uri'] not in episode_uris for item in items)} music tracks"
+    if trace:
+        detail += "\nSelection:\n" + "\n".join(" ".join(line.split()) for line in trace)
     if items:
         labels = []
         for item in items:

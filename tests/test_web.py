@@ -54,17 +54,21 @@ class WebTests(unittest.TestCase):
         store.resolve(True)
         history_id = store.start()
         store.prepare(history_id, "target", [], ["track1", "episode"], ["episode"],
-                      "90 minutes; 1 music tracks\nItems:\nArtist - Song\n[Episode] News & <Update>")
+                      "90 minutes; 1 music tracks\nSelection:\nArtist & <choice>\n"
+                      "News show: 1/1 episodes\nItems:\nArtist - Song\n[Episode] News & <Update>")
         store.resolve(True)
 
         response = self.client.get("/", environ_overrides=self.remote)
         self.assertIn(b"90 minutes; 2 music tracks", response.data)
         self.assertIn(b"<details><summary>Show playlist items</summary>", response.data)
+        self.assertIn(b"<details><summary>How this playlist was selected</summary>", response.data)
+        self.assertIn(b"<li>Artist &amp; &lt;choice&gt;</li>", response.data)
+        self.assertIn(b"<li>News show: 1/1 episodes</li>", response.data)
         self.assertIn(b"<li>Artist - Song</li>", response.data)
         self.assertIn(b"<li>Other &amp; Artist - &lt;Song&gt;</li>", response.data)
         self.assertIn(b"<li>[Episode] News &amp; &lt;Update&gt;</li>", response.data)
         self.assertIn(b"Old error message", response.data)
-        self.assertEqual(response.data.count(b"<details>"), 2)
+        self.assertEqual(response.data.count(b"<details>"), 3)
 
     def test_configuration_accepts_urls_and_rejects_target_as_source(self):
         pid = "0123456789ABCDEFGHIJKL"

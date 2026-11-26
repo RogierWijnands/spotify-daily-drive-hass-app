@@ -76,6 +76,9 @@ An error page may appear after authorization; copy the full URL from the address
 <form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh now</button></form>
 <h2>History</h2><table><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr>
 {% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}</td><td>{{ entry.summary }}
+{% if entry.selection %}<details><summary>How this playlist was selected</summary><ul>
+{% for line in entry.selection %}<li>{{ line }}</li>{% endfor %}
+</ul></details>{% endif %}
 {% if entry.items_list %}<details><summary>Show playlist items</summary><ol>
 {% for item in entry.items_list %}<li>{{ item }}</li>{% endfor %}
 </ol></details>{% endif %}</td></tr>{% endfor %}
@@ -118,7 +121,9 @@ def home(message=None, status=200):
         summary, separator, items = entry["detail"].partition("\nItems:\n")
         if not separator:
             summary, separator, items = entry["detail"].partition("\nTracks:\n")
+        summary, selection_separator, selection = summary.partition("\nSelection:\n")
         entry["summary"] = summary
+        entry["selection"] = selection.splitlines() if selection_separator else []
         entry["items_list"] = items.splitlines() if separator else []
 
     return render_template_string(
