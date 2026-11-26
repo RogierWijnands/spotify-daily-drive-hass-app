@@ -192,14 +192,14 @@ class Spotify:
         return result
 
     def liked_tracks(self, rng):
-        # Discover the library size before sampling up to five distinct pages.
-        first = self.get("/me/tracks", market="NL", limit=1, offset=0)
+        # Fetch the first page with the total so it can also be used if sampled.
+        first = self.get("/me/tracks", market="NL", limit=50, offset=0)
         if not isinstance(first, dict):
             raise SpotifyError("Spotify returned an invalid liked-track page")
         total = first.get("total")
         if not isinstance(total, int) or isinstance(total, bool) or total < 0:
             raise SpotifyError("Spotify returned an invalid liked-track count")
-        if not isinstance(first.get("items"), list) or len(first["items"]) != min(total, 1):
+        if not isinstance(first.get("items"), list) or len(first["items"]) != min(total, 50):
             raise SpotifyError("Spotify returned an inconsistent liked-track count")
         if total <= 1:
             return first["items"]
@@ -209,7 +209,7 @@ class Spotify:
         result = []
         try:
             for page in pages:
-                response = self.get("/me/tracks", market="NL", limit=50, offset=page * 50)
+                response = first if page == 0 else self.get("/me/tracks", market="NL", limit=50, offset=page * 50)
                 if not isinstance(response, dict) or not isinstance(response.get("items"), list) \
                         or not response["items"]:
                     raise SpotifyError("Spotify returned an invalid sampled liked-track page")

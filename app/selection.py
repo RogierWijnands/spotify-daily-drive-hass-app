@@ -156,8 +156,19 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
     older_top_tracks = [t for t in long_term_top_tracks if t.get("id") not in current_ids]
     top_and_recent_tracks = short_term_top_tracks + medium_term_top_tracks + recently_played_tracks
 
-    # Get one random time range of top artists and add the persistent followed-artist cache.
-    random_time_range = rng.choice(("short_term", "medium_term", "long_term"))
+    # Keep the random time range for the whole day, even if its Spotify request fails.
+    range_chosen = False
+
+    def choose_time_range():
+        nonlocal range_chosen
+        range_chosen = True
+        return rng.choice(("short_term", "medium_term", "long_term"))
+
+    random_time_range = api.daily_cached("top_artists_time_range_cache", choose_time_range)
+    if trace is not None:
+        origin = "chosen randomly for today" if range_chosen else "reused from today's cache"
+        trace.append(f"Top artist time range: {random_time_range}; {origin}.")
+
     top_artists = get_api_items("top artists",
                                 lambda: cached_top_items("artists", random_time_range), issues)
     fetch_followed = api.followed_artists if trace is None else lambda: api.followed_artists(trace=trace)
@@ -205,7 +216,12 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
         trace.append("Artists searched for discovery (not necessarily selected for the playlist): "
                      + (", ".join(selected_names) if selected_names else "none") + ".")
 
+    release_track_cache = {}
+    release_tracks_reused = 0
+    release_tracks_fetched = 0
+
     def artist_tracks(artist_id, include_groups):
+        nonlocal release_tracks_reused, release_tracks_fetched
         # Find music from one artist. include_groups determines which kinds of
         # releases to search, such as albums, singles, or appearances.
         path = f"/artists/{artist_id}/albums"
@@ -228,12 +244,31 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
 
         # Pick up to two different positions from all available releases.
         # Old and new releases have the same chance of being picked.
+        indices = rng.sample(range(total), min(total, 2))
+        combined = {}
+
+        # Fetch nearby sampled positions together without changing their random selection.
+        if len(indices) == 2 and min(indices) >= len(page["items"]) and max(indices) - min(indices) < 10:
+            offset = min(indices)
+            limit = max(indices) - offset + 1
+            try:
+                selected = api.get(path, **params, limit=limit, offset=offset)
+                if not isinstance(selected, dict) or not isinstance(selected.get("items"), list) \
+                        or len(selected["items"]) != limit:
+                    raise SpotifyError("Spotify returned invalid combined artist releases")
+                combined = {index: selected["items"][index - offset] for index in indices}
+            except (SpotifyError, RequestException) as exc:
+                api_warning(issues, "Combined release lookup for artist %s failed: %s; fetching separately",
+                            artist_id, exc)
+
         tracks = []
-        for index in rng.sample(range(total), min(total, 2)):
+        for index in indices:
             try:
                 if index < len(page["items"]):
                     # This release was included in the first request.
                     album = page["items"][index]
+                elif index in combined:
+                    album = combined[index]
                 else:
                     # Fetch only the selected position, not every page in between.
                     selected = api.get(path, **params, limit=1, offset=index)
@@ -245,16 +280,22 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                 if not isinstance(album, dict) or not isinstance(album.get("id"), str) or not album["id"]:
                     raise SpotifyError("Spotify returned an artist release without an ID")
 
-                # The later selection decides which of these tracks enter the playlist.
-                release = api.get(f"/albums/{album['id']}/tracks", market="NL", limit=50)
-                if not isinstance(release, dict) or not isinstance(release.get("items"), list) \
-                        or not all(
-                            isinstance(item, dict)
-                            and (item.get("artists") is None or isinstance(item["artists"], list))
-                            for item in release["items"]
-                        ):
-                    raise SpotifyError("Spotify returned invalid artist release tracks")
-                tracks.extend(release["items"])
+                # Reuse a release only within this refresh; failed requests are never cached.
+                album_id = album["id"]
+                if album_id in release_track_cache:
+                    release_tracks_reused += 1
+                else:
+                    release = api.get(f"/albums/{album_id}/tracks", market="NL", limit=50)
+                    if not isinstance(release, dict) or not isinstance(release.get("items"), list) \
+                            or not all(
+                                isinstance(item, dict)
+                                and (item.get("artists") is None or isinstance(item["artists"], list))
+                                for item in release["items"]
+                            ):
+                        raise SpotifyError("Spotify returned invalid artist release tracks")
+                    release_track_cache[album_id] = release["items"]
+                    release_tracks_fetched += 1
+                tracks.extend(release_track_cache[album_id])
             except (SpotifyError, RequestException) as exc:
                 api_warning(issues, "Skipping release at position %s for artist %s: %s", index, artist_id, exc)
         return tracks
@@ -302,6 +343,10 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
             if any(isinstance(credit, dict) and credit.get("id") == artist_id
                    for credit in (item.get("artists") or []))
         )
+
+    if trace is not None:
+        trace.append(f"Release track lists: {release_tracks_reused} reused from this refresh's cache; "
+                     f"{release_tracks_fetched} retrieved from Spotify during this refresh.")
 
     groups = (top_and_recent_tracks, older_top_tracks, discoveries, configured, liked_tracks, collaborator_tracks)
 
