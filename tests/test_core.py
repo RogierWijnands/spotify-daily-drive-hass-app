@@ -1035,15 +1035,16 @@ class SpotifyTests(unittest.TestCase):
                 for _ in range(5):
                     with self.assertRaisesRegex(SpotifyError, "unavailable"):
                         api.followed_artists()
-                with self.assertRaisesRegex(SpotifyError, "unavailable"):
-                    api.followed_artists()
+                trace = []
+                self.assertEqual(api.followed_artists(trace), [])
+                self.assertIn("Followed-artist daily limit of 5 requests reached; no new Spotify request.", trace)
                 self.assertEqual(api.get.call_count, 5)
                 clock.now.return_value = datetime(2026, 1, 16, tzinfo=timezone.utc)
                 with self.assertRaisesRegex(SpotifyError, "unavailable"):
                     api.followed_artists()
                 self.assertEqual(api.get.call_count, 6)
 
-    def test_followed_artist_daily_limit_marks_retry_after_as_previous_error(self):
+    def test_followed_artist_daily_limit_does_not_repeat_previous_error(self):
         with tempfile.TemporaryDirectory() as directory:
             api = Spotify.__new__(Spotify)
             api.store = Store(os.path.join(directory, "cache.sqlite"))
@@ -1059,25 +1060,28 @@ class SpotifyTests(unittest.TestCase):
                 clock.now.return_value = datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc)
                 with self.assertRaisesRegex(SpotifyError, "Retry-After: '172'"):
                     api.followed_artists()
-                original_error = api.store.get("followed_artists_cache")["last_error"]
+                state = api.store.get("followed_artists_cache")
+                self.assertNotIn("last_error", state)
+                state["last_error"] = "previous error; Retry-After: '172'"
+                api.store.set_many({"followed_artists_cache": state})
 
                 clock.now.return_value = datetime(2026, 1, 15, 10, 5, tzinfo=timezone.utc)
                 for _ in range(2):
                     trace = []
-                    with self.assertLogs("app.selection", level="WARNING") as logs:
-                        artists = get_api_items("followed artists", lambda: api.followed_artists(trace))
+                    issues = []
+                    artists = get_api_items("followed artists", lambda: api.followed_artists(trace), issues)
                     self.assertEqual(len(artists), 4)
                     self.assertIn("Followed artists: 4 reused from cache; 0 retrieved from Spotify during this refresh.",
                                   trace)
-                    self.assertIn("daily limit of 5 requests reached; no new Spotify request", logs.output[0])
-                    self.assertIn("previous error", logs.output[0])
-                    self.assertIn("Retry-After: '172'", logs.output[0])
-                    self.assertEqual(api.store.get("followed_artists_cache")["last_error"], original_error)
+                    self.assertIn("Followed-artist daily limit of 5 requests reached; no new Spotify request.", trace)
+                    self.assertEqual(issues, [])
+                    self.assertNotIn("Retry-After", "\n".join(trace))
                 self.assertEqual(api.get.call_count, 5)
 
                 clock.now.return_value = datetime(2026, 1, 16, 10, 0, tzinfo=timezone.utc)
                 self.assertEqual(len(api.followed_artists()), 5)
                 self.assertEqual(api.get.call_count, 6)
+                self.assertNotIn("last_error", api.store.get("followed_artists_cache"))
 
     def test_invalid_followed_artist_cursor_fails(self):
         with tempfile.TemporaryDirectory() as directory:

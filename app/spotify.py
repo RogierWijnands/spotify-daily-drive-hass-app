@@ -219,8 +219,9 @@ class Spotify:
         # Keep the collected artists and scan position between refreshes and restarts.
         state = self.store.get(key, {
             "artists": {}, "cursor": None, "seen_ids": [], "seen_cursors": [],
-            "day": None, "requests": 0, "completed_day": None, "last_error": None,
+            "day": None, "requests": 0, "completed_day": None,
         })
+        state.pop("last_error", None)
         cached_ids = set(state["artists"])
         fetched_ids = set()
 
@@ -236,15 +237,11 @@ class Spotify:
             state["day"] = day
             state["requests"] = 0
 
-        if state["requests"] >= 5 and state["last_error"]:
+        if state["requests"] >= 5 and state["completed_day"] != day:
+            if trace is not None:
+                trace.append("Followed-artist daily limit of 5 requests reached; no new Spotify request.")
             report_cache()
-            error = SpotifyError(
-                "Followed-artist daily limit of 5 requests reached; no new Spotify request. "
-                f"The previous error (including any Retry-After from that time) was: {state['last_error']}"
-            )
-            if state["artists"]:
-                raise SpotifyPartialError(error, list(state["artists"].values()))
-            raise error
+            return list(state["artists"].values())
 
         # Spotify gives us a cursor for the next page, not a random page number.
         # Continue from that cursor with at most five requests per Amsterdam day.
@@ -283,7 +280,6 @@ class Spotify:
                     state["seen_ids"].append(artist["id"])
                     fetched_ids.add(artist["id"])
                 state["cursor"] = cursor
-                state["last_error"] = None
                 if cursor is not None:
                     state["seen_cursors"].append(cursor)
                 else:
@@ -299,8 +295,6 @@ class Spotify:
                 self.store.set_many({key: state})
         except (SpotifyError, requests.RequestException) as exc:
             # Report the error but let selection use any artists already in the cache.
-            state["last_error"] = str(exc)
-            self.store.set_many({key: state})
             report_cache()
             if state["artists"]:
                 raise SpotifyPartialError(exc, list(state["artists"].values())) from exc
