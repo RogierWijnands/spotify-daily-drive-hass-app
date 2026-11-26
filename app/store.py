@@ -5,6 +5,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 
+def selection_details(detail):
+    _, separator, selection = detail.partition("\nSelection:\n")
+    return "\nSelection:\n" + selection.partition("\nItems:\n")[0] if separator else ""
+
+
 class Store:
     def __init__(self, path):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -34,10 +39,13 @@ class Store:
                 UPDATE history SET status='failed', detail='App stopped before replacing the playlist'
                 WHERE status='in_progress' AND id NOT IN (SELECT history_id FROM pending)
             """)
-            db.execute("""
-                UPDATE history SET status='uncertain', detail='App stopped during playlist replacement'
-                WHERE status='in_progress' AND id IN (SELECT history_id FROM pending)
-            """)
+            pending = db.execute("SELECT history_id, detail FROM pending").fetchone()
+            if pending:
+                db.execute("""
+                    UPDATE history SET status='uncertain', detail=?
+                    WHERE status='in_progress' AND id=?
+                """, ("App stopped during playlist replacement" + selection_details(pending["detail"]),
+                      pending["history_id"]))
         os.chmod(path, 0o600)
 
     @contextmanager
@@ -170,12 +178,13 @@ class Store:
     def release_pending(self):
         # Manual release does not claim that the Spotify write succeeded or failed.
         with self.connect() as db:
-            row = db.execute("SELECT history_id FROM pending WHERE id=1").fetchone()
+            row = db.execute("SELECT history_id, detail FROM pending WHERE id=1").fetchone()
             if not row:
                 raise ValueError("There is no uncertain change")
 
             db.execute(
                 "UPDATE history SET status=?,detail=? WHERE id=?",
-                ("uncertain", "Manually released; outcome not determined", row["history_id"]),
+                ("uncertain", "Manually released; outcome not determined" + selection_details(row["detail"]),
+                 row["history_id"]),
             )
             db.execute("DELETE FROM pending WHERE id=1")

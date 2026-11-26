@@ -3,6 +3,7 @@ import threading
 
 from .selection import build
 from .spotify import Spotify, SpotifyError, SpotifyRateLimitError
+from .store import selection_details
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class Refresh:
             self.store.resolve(True, "Confirmed afterwards; " + pending["detail"])
             return True
         elif actual == pending["before_items"]:
-            self.store.resolve(False, "Spotify change was not applied")
+            self.store.resolve(False, "Spotify change was not applied" + selection_details(pending["detail"]))
             return False
         else:
             raise SpotifyError("Previous change has an uncertain outcome; check and restore the playlist manually")
@@ -35,6 +36,7 @@ class Refresh:
             raise SpotifyError("A refresh is already running")
 
         history_id = None
+        detail = None
         try:
             history_id = self.store.start(scheduled_key)
             if history_id is None:
@@ -89,7 +91,10 @@ class Refresh:
             if history_id is not None:
                 # A pending write means the actual playlist contents are still unknown.
                 status = "uncertain" if self.store.pending() else "failed"
-                self.store.finish(history_id, status, str(exc))
+                error = str(exc)
+                if detail:
+                    error += selection_details(detail)
+                self.store.finish(history_id, status, error)
             raise
         finally:
             self.lock.release()

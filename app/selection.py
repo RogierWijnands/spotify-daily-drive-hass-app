@@ -1,6 +1,6 @@
 import logging
 import random
-from itertools import zip_longest
+from itertools import islice, zip_longest
 
 from requests import RequestException
 
@@ -18,9 +18,8 @@ def valid(item, kind):
         and item.get("type") == kind
         and item.get("uri")
         and isinstance(item.get("duration_ms"), int) and item["duration_ms"] > 0
-        and item.get("is_playable") is True
         and not item.get("is_local", False)
-        and not item.get("restrictions")
+        and (kind == "track" or (item.get("is_playable") is True and not item.get("restrictions")))
     )
 
 
@@ -104,14 +103,35 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
 
 
 def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
+    def cached_items(key, path, **params):
+        def fetch():
+            result = api.get(path, **params)
+            if isinstance(result, dict):
+                result = result.get("items")
+            if not isinstance(result, list):
+                raise SpotifyError("Spotify returned an invalid item list")
+            return result
+
+        # Cache only successful, valid responses for the current Amsterdam day.
+        return api.daily_cached(key, fetch, trace=trace)
+
+    def cached_top_items(kind, time_range):
+        # Keep each top-list time range in a separate cache entry.
+        return cached_items(f"top_{kind}_{time_range}_cache", f"/me/top/{kind}",
+                            time_range=time_range, limit=50)
+
     # Each source can fail independently without blocking the other sources.
     short_term_top_tracks = get_api_items("short-term top tracks",
-                                          lambda: api.get("/me/top/tracks", time_range="short_term", limit=50), issues)
+                                          lambda: cached_top_items("tracks", "short_term"), issues)
     medium_term_top_tracks = get_api_items("medium-term top tracks",
-                                           lambda: api.get("/me/top/tracks", time_range="medium_term", limit=50), issues)
+                                           lambda: cached_top_items("tracks", "medium_term"), issues)
     long_term_top_tracks = get_api_items("long-term top tracks",
-                                         lambda: api.get("/me/top/tracks", time_range="long_term", limit=50), issues)
-    recent_entries = get_api_items("recent tracks", lambda: api.get("/me/player/recently-played", limit=50), issues)
+                                         lambda: cached_top_items("tracks", "long_term"), issues)
+    recent_entries = get_api_items(
+        "recent tracks",
+        lambda: cached_items("recently_played_tracks_cache", "/me/player/recently-played", limit=50),
+        issues,
+    )
     recently_played_tracks = [entry.get("track") for entry in recent_entries if isinstance(entry, dict)]
 
     def fetch_liked_tracks():
@@ -139,7 +159,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
     # Get one random time range of top artists and add the persistent followed-artist cache.
     random_time_range = rng.choice(("short_term", "medium_term", "long_term"))
     top_artists = get_api_items("top artists",
-                                lambda: api.get("/me/top/artists", time_range=random_time_range, limit=50), issues)
+                                lambda: cached_top_items("artists", random_time_range), issues)
     fetch_followed = api.followed_artists if trace is None else lambda: api.followed_artists(trace=trace)
     followed_artists = get_api_items("followed artists", fetch_followed, issues)
 
@@ -283,42 +303,12 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                    for credit in (item.get("artists") or []))
         )
 
-    # Top and recently played endpoints do not accept a market, so they may omit
-    # whether a track is playable in NL. Look up those tracks with market=NL before
-    # deciding whether to include them.
-    cache = {}
-    failed_tracks = set()
-
-    def playable(items):
-        result = []
-        for item in items:
-            if not isinstance(item, dict) or item.get("type") != "track" or not item.get("id"):
-                continue
-            if item.get("is_playable") is None:
-                tid = item["id"]
-                # Do not request the same missing or failed track again in this refresh.
-                if tid in failed_tracks:
-                    continue
-                if tid not in cache:
-                    try:
-                        cache[tid] = api.get(f"/tracks/{tid}", market="NL")
-                    except (SpotifyError, RequestException) as exc:
-                        failed_tracks.add(tid)
-                        api_warning(issues, "Skipping track %s: %s", tid, exc)
-                        continue
-                item = cache[tid]
-            if valid(item, "track"):
-                result.append(item)
-                if len(result) == 80:
-                    break
-        return result
-
     groups = (top_and_recent_tracks, older_top_tracks, discoveries, configured, liked_tracks, collaborator_tracks)
 
-    # Shuffle before selecting up to 80 playable tracks from each group.
+    # Shuffle before selecting up to 80 valid tracks from each group.
     for group in groups:
         rng.shuffle(group)
-    return [playable(group) for group in groups]
+    return [list(islice((item for item in group if valid(item, "track") and item.get("id")), 80)) for group in groups]
 
 
 def select_music(groups, podcasts, rng, trace=None):
@@ -348,7 +338,7 @@ def select_music(groups, podcasts, rng, trace=None):
     podcast_ms = sum(p["duration_ms"] for p in podcasts)
 
     if not chosen and not remaining and not podcasts:
-        raise SpotifyError("No playable music found")
+        raise SpotifyError("No suitable music found")
 
     def fit(reserved, candidates):
         base = podcast_ms + sum(item["duration_ms"] for item in reserved)
@@ -427,12 +417,17 @@ def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None, trace=No
     try:
         music = select_music(groups, podcasts, rng, trace)
     except SpotifyError as exc:
+        message = str(exc)
         if issues:
             # Include a rate limit and a few source errors when the final selection fails.
             rate_limits = [issue for issue in issues if "Retry-After" in issue]
             details = list(dict.fromkeys(rate_limits[:1] + issues[:3]))
-            raise SpotifyError(f"{exc}; source errors: {'; '.join(details)}") from exc
-        raise
+            message += f"; source errors: {'; '.join(details)}"
+        if trace is not None:
+            trace.extend(f"Source warning: {issue}" for issue in issues)
+            if trace:
+                message += "\nSelection:\n" + "\n".join(" ".join(line.split()) for line in trace)
+        raise SpotifyError(message) from exc
     result = interleave(music, podcasts, rng)
     total = sum(item["duration_ms"] for item in result)
     podcast_total = sum(item["duration_ms"] for item in podcasts)

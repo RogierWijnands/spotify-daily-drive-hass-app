@@ -27,8 +27,25 @@ class SpotifyPartialError(SpotifyError):
         self.items = items
 
 
-def _request_error(response, message):
-    # Keep Spotify's retry delay visible in logs and failed refresh history.
+def _request_error(response, message, sensitive_values=()):
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        fields = (("Message", error.get("message")), ("Reason", error.get("reason")))
+    elif isinstance(error, str):
+        fields = (("Error", error), ("Description", body.get("error_description")))
+    else:
+        fields = ()
+    for label, value in fields:
+        if isinstance(value, str) and value.strip():
+            for sensitive in sensitive_values:
+                if isinstance(sensitive, str) and sensitive:
+                    value = value.replace(sensitive, "[redacted]")
+            message += f"; {label}: {' '.join(value.split())}"
+
     if response.status_code != 429:
         return SpotifyError(message)
     retry_after = response.headers.get("Retry-After")
@@ -103,7 +120,8 @@ def callback_code(url, state):
 def token_request(data):
     response = requests.post(TOKEN_URL, data=data, timeout=20)
     if not response.ok:
-        raise _request_error(response, f"Spotify token request failed (HTTP {response.status_code})")
+        sensitive = [data.get(key) for key in ("code", "code_verifier", "refresh_token", "client_secret")]
+        raise _request_error(response, f"Spotify token request failed (HTTP {response.status_code})", sensitive)
     return response.json()
 
 
@@ -128,13 +146,19 @@ class Spotify:
         )
         if not response.ok:
             if path == "/me/tracks" and response.status_code == 403:
-                raise SpotifyError("Liked tracks are inaccessible (HTTP 403); reconnect Spotify and grant library access")
-            if path == "/me/following" and response.status_code in (401, 403):
-                raise SpotifyError(
-                    f"Followed artists are inaccessible (HTTP {response.status_code}); "
-                    "reconnect Spotify and grant access to followed artists"
+                raise _request_error(
+                    response, "Liked tracks are inaccessible (HTTP 403); reconnect Spotify and grant library access",
+                    (self.token,),
                 )
-            raise _request_error(response, f"Spotify {method} {path} failed (HTTP {response.status_code})")
+            if path == "/me/following" and response.status_code in (401, 403):
+                raise _request_error(
+                    response,
+                    f"Followed artists are inaccessible (HTTP {response.status_code}); "
+                    "reconnect Spotify and grant access to followed artists",
+                    (self.token,),
+                )
+            raise _request_error(response, f"Spotify {method} {path} failed (HTTP {response.status_code})",
+                                 (self.token,))
         return response.json() if response.content else {}
 
     def get(self, path, **params):
@@ -143,18 +167,28 @@ class Spotify:
     def daily_cached(self, key, fetch, trace=None):
         day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
         cached = self.store.get_cached(key, day)
+        label = key.removesuffix("_cache").replace("_", " ").capitalize()
 
         # An empty list is a valid hit; only cache after a complete fetch.
         if cached is not None:
             if trace is not None:
-                trace.append(f"{key.removesuffix('_cache').replace('_', ' ').capitalize()}: "
-                             "retrieved from today's cache.")
+                trace.append(f"{label}: retrieved from today's cache.")
             return cached
-        result = fetch()
+
+        try:
+            result = fetch()
+        except SpotifyPartialError:
+            if trace is not None:
+                trace.append(f"{label}: partially retrieved from Spotify during this refresh; not cached.")
+            raise
+        except (SpotifyError, requests.RequestException):
+            if trace is not None:
+                trace.append(f"{label}: Spotify fetch failed; no data retrieved from cache.")
+            raise
+
         self.store.set_cached(key, day, result)
         if trace is not None:
-            trace.append(f"{key.removesuffix('_cache').replace('_', ' ').capitalize()}: "
-                         "retrieved from Spotify and saved in today's cache.")
+            trace.append(f"{label}: retrieved from Spotify and saved in today's cache.")
         return result
 
     def liked_tracks(self, rng):
@@ -224,6 +258,7 @@ class Spotify:
         state.pop("last_error", None)
         cached_ids = set(state["artists"])
         fetched_ids = set()
+        attempted = False
 
         def report_cache():
             if trace is not None:
@@ -232,6 +267,9 @@ class Spotify:
                 refreshed = len(result_ids & fetched_ids)
                 trace.append(f"Followed artists: {reused} reused from cache; "
                              f"{refreshed} retrieved from Spotify during this refresh.")
+                if not result_ids:
+                    origin = "Spotify was queried" if attempted else "no Spotify request was made"
+                    trace.append(f"Followed artists: no artists available; {origin} during this refresh.")
 
         if state["day"] != day:
             state["day"] = day
@@ -254,6 +292,7 @@ class Spotify:
                 # Count the attempt before sending it, including failed requests.
                 state["requests"] += 1
                 self.store.set_many({key: state})
+                attempted = True
                 response = self.get("/me/following", **params)
                 if not isinstance(response, dict) or not isinstance(response.get("artists"), dict):
                     raise SpotifyError("Spotify returned an invalid followed-artist page")

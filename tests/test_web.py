@@ -39,11 +39,24 @@ class WebTests(unittest.TestCase):
 
     def test_history_displays_rate_limit_retry_after(self):
         entry = {"started": "2026-01-01", "status": "failed",
-                 "detail": "Spotify GET /me/top/artists failed (HTTP 429); Retry-After: '45'"}
+                 "detail": "Spotify GET /me/top/artists failed (HTTP 429); "
+                           "Message: quota <exceeded>; Reason: QUOTA_EXCEEDED; Retry-After: '45'"}
         with patch.object(web.store, "history", return_value=[entry]):
             response = self.client.get("/", environ_overrides=self.remote)
         self.assertIn(b"HTTP 429", response.data)
+        self.assertIn(b"Message: quota &lt;exceeded&gt;; Reason: QUOTA_EXCEEDED", response.data)
         self.assertIn(b"Retry-After: &#39;45&#39;", response.data)
+
+    def test_failed_history_displays_cache_origins(self):
+        entry = {"started": "2026-01-01", "status": "failed",
+                 "detail": "No suitable music found\nSelection:\n"
+                           "Liked tracks: retrieved from today\'s cache.\n"
+                           "Recently played tracks: Spotify fetch failed; no data retrieved from cache."}
+        with patch.object(web.store, "history", return_value=[entry]):
+            response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b"No suitable music found", response.data)
+        self.assertIn(b"Liked tracks: retrieved from today&#39;s cache.", response.data)
+        self.assertIn(b"Recently played tracks: Spotify fetch failed; no data retrieved from cache.", response.data)
 
     def test_history_expands_tracks_and_keeps_old_details_readable(self):
         store = self.isolated_store()
