@@ -12,7 +12,7 @@ from requests import RequestException
 from waitress import serve
 
 from .constants import (
-    ARTIST_RELEASE_ERROR_PREFIXES, ARTIST_RELEASE_SOURCE, BYTES_PER_MEBIBYTE,
+    ARTIST_RELEASE_ERROR_PREFIXES, ARTIST_RELEASE_SOURCE, AUTOMATIC_REFRESH_ENABLED_KEY, BYTES_PER_MEBIBYTE,
     DEFAULT_SPOTIFY_MARKET, DEFAULT_TIMEZONE, EMPTY_ARTIST_POOL_ERROR, EMPTY_GROUP_ERROR,
     EMPTY_GROUP_HISTORY_MARKER, HISTORY_ERROR_MARKERS,
     HISTORY_LIKED_TRACKS_LABEL, HISTORY_RECENT_TRACKS_LABEL, HISTORY_TOP_ARTISTS_PREFIX,
@@ -173,6 +173,13 @@ Check the playlist. New changes are blocked until the contents can be confirmed 
 <label><input style="width:auto" type="checkbox" name="confirm" required>
 I have checked the playlist and understand that the previous outcome remains unknown.</label>
 <button>Release block manually</button></form>{% endif %}
+<h2>Automatic refresh</h2>
+<p>Automatic refresh is {{ 'enabled' if automatic_refresh_enabled else 'disabled' }}.
+Scheduled times: {{ refresh_times | join(', ') }} ({{ timezone_display }}).</p>
+<form action="automatic-refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="enabled" value="{{ 'off' if automatic_refresh_enabled else 'on' }}">
+<button>{{ 'Disable' if automatic_refresh_enabled else 'Enable' }} automatic refresh</button></form>
+<p>Changing this setting does not stop a refresh already in progress. Manual refresh remains available.</p>
 <h2>Settings</h2>
 <form action="configure" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label>Spotify client ID <input name="client_id" required value="{{ client_id }}"></label>
@@ -201,7 +208,7 @@ An error page may appear after authorization; copy the full URL from the address
 <form action="callback" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label>Callback URL <input name="callback" required autocomplete="off"></label><button>Complete connection</button></form>
 {% endif %}
-<h2>Refresh</h2><p>Automatically at {{ refresh_times | join(', ') }} ({{ timezone_display }}).</p>
+<h2>Refresh</h2>
 <form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh now</button></form>
 <h2>History</h2><table><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr>
 {% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}</td><td>{{ entry.summary }}
@@ -307,6 +314,7 @@ def home(message=None, status=HTTPStatus.OK):
         connected=bool(store.get("refresh_token")),
         pending=store.pending(),
         history=history,
+        automatic_refresh_enabled=store.automatic_refresh_enabled(),
         request_day=request_day,
         request_overview=request_overview,
         refresh_times=REFRESH_TIMES,
@@ -320,6 +328,20 @@ def home(message=None, status=HTTPStatus.OK):
 @app.get("/")
 def index():
     return home()
+
+
+@app.post("/automatic-refresh")
+def configure_automatic_refresh():
+    enabled = request.form.get("enabled")
+    if enabled not in ("on", "off"):
+        return home("Invalid automatic refresh setting.", HTTPStatus.BAD_REQUEST)
+    try:
+        store.set_many({AUTOMATIC_REFRESH_ENABLED_KEY: enabled == "on"})
+    except sqlite3.Error:
+        log.exception("Failed to save automatic refresh setting")
+        return home("Could not save automatic refresh setting; check the app log.",
+                    HTTPStatus.INTERNAL_SERVER_ERROR)
+    return home(f"Automatic refresh {'enabled' if enabled == 'on' else 'disabled'}.")
 
 
 @app.post("/configure")
@@ -510,14 +532,16 @@ def scheduler():
     # Check local time regularly; the stored key prevents duplicate scheduled runs.
     while True:
         try:
-            now = current_time(store, datetime)
+            enabled = store.automatic_refresh_enabled()
+            now = current_time(store, datetime) if enabled else None
         except (sqlite3.Error, ValueError):
-            log.exception("Could not read the scheduler timezone")
+            log.exception("Could not read the scheduler settings")
             time.sleep(SCHEDULER_POLL_INTERVAL_SECONDS)
             continue
-        clock = now.strftime("%H:%M")
-        if clock in REFRESH_TIMES:
-            run_refresh(now.strftime("%Y-%m-%d") + " " + clock)
+        if now is not None:
+            clock = now.strftime("%H:%M")
+            if clock in REFRESH_TIMES:
+                run_refresh(now.strftime("%Y-%m-%d") + " " + clock)
         time.sleep(SCHEDULER_POLL_INTERVAL_SECONDS)
 
 

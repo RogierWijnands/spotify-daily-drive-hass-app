@@ -37,6 +37,45 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"06:00, 10:00, 14:00, 18:00, 22:00", response.data)
         self.assertEqual(self.client.post("/refresh", environ_overrides=self.remote).status_code, 403)
 
+    def test_automatic_refresh_can_be_toggled_and_is_persistent(self):
+        store = self.isolated_store()
+        store.set_many({"client_id": "a" * 32, "refresh_token": "saved"})
+        response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b"Automatic refresh is enabled", response.data)
+        self.assertIn(b"Disable automatic refresh", response.data)
+        self.assertLess(response.data.index(b"<h2>Automatic refresh</h2>"),
+                        response.data.index(b"<h2>Settings</h2>"))
+
+        web.refresh.lock.acquire()
+        try:
+            response = self.client.post(
+                "/automatic-refresh", data={"csrf": web.csrf, "enabled": "off"},
+                environ_overrides=self.remote,
+            )
+        finally:
+            web.refresh.lock.release()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Automatic refresh is disabled", response.data)
+        self.assertIn(b"Enable automatic refresh", response.data)
+        self.assertFalse(Store(store.path).automatic_refresh_enabled())
+        self.assertEqual(store.get("refresh_token"), "saved")
+
+        response = self.client.post(
+            "/automatic-refresh", data={"csrf": web.csrf, "enabled": "invalid"},
+            environ_overrides=self.remote,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(store.automatic_refresh_enabled())
+        self.assertEqual(self.client.post("/automatic-refresh", data={"enabled": "on"},
+                                          environ_overrides=self.remote).status_code, 403)
+
+        response = self.client.post(
+            "/automatic-refresh", data={"csrf": web.csrf, "enabled": "on"},
+            environ_overrides=self.remote,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(Store(store.path).automatic_refresh_enabled())
+
     def test_request_overview_shows_daily_counts_and_first_quota_between_sections(self):
         store = self.isolated_store()
         started = datetime.now().astimezone()
@@ -414,6 +453,26 @@ class WebTests(unittest.TestCase):
             with self.assertRaises(StopIteration):
                 web.scheduler()
         self.assertEqual(run.call_args_list, [call("2026-01-15 06:00"), call("2026-01-16 06:00")])
+
+    def test_scheduler_skips_disabled_runs_and_responds_to_enabling(self):
+        store = self.isolated_store()
+        store.set_many({"timezone": "UTC", "automatic_refresh_enabled": False})
+        sleep_calls = []
+
+        def sleep(interval):
+            sleep_calls.append(interval)
+            if len(sleep_calls) == 1:
+                store.set_many({"automatic_refresh_enabled": True})
+            else:
+                raise StopIteration
+
+        with patch("app.web.datetime") as clock, patch("app.web.run_refresh") as run, \
+             patch("app.web.time.sleep", side_effect=sleep):
+            clock.now.return_value = datetime(2026, 1, 15, 6, tzinfo=timezone.utc)
+            with self.assertRaises(StopIteration):
+                web.scheduler()
+        run.assert_called_once_with("2026-01-15 06:00")
+        self.assertEqual(clock.now.call_count, 1)
 
 
 if __name__ == "__main__":

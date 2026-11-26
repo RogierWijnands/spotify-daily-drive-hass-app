@@ -48,6 +48,10 @@ class Refresh:
         history_id = None
         detail = None
         try:
+            # Recheck after acquiring the lock: the setting may have changed since scheduling.
+            if scheduled_key is not None and not self.store.automatic_refresh_enabled():
+                return
+
             history_id = self.store.start(scheduled_key)
             if history_id is None:
                 return

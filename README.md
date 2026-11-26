@@ -12,7 +12,7 @@ Spotify used to have Daily Drive, a playlist that combines your favorite music, 
 6. Select **Refresh now** and check the history and app log.
 
 - No Spotify client secret is needed.
-- Automatic refresh: **06:00, 10:00, 14:00, 18:00, 22:00** in the configured timezone. The default is the app's system timezone; enter an IANA timezone such as `Europe/Amsterdam` to override it. The app must be running; missed times are not retried.
+- Automatic refresh: enabled by default at **06:00, 10:00, 14:00, 18:00, 22:00** in the configured timezone. Use the button at the top of the web UI to enable or disable it; manual refresh remains available, and an ongoing refresh is not stopped. The default timezone is the app's system timezone; enter an IANA timezone such as `Europe/Amsterdam` to override it. The app must be running; missed times are not retried.
 - Spotify market: enter a two-letter country code such as `NL` (the default) or `US`. Spotify determines supported markets and may prioritize the connected account's country.
 - Changing the market or timezone clears daily caches. Changing the timezone also clears daily request statistics because the day boundaries change; the connection and followed artists are kept. Resolve an uncertain playlist change before changing the market.
 - Data from versions before `0.1.27` was grouped by Amsterdam time. If the system timezone differs, existing cache and request counts can reflect the old day boundary until the next local day or until stored data is cleared.

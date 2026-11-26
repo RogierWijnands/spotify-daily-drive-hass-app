@@ -5,7 +5,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .constants import (
-    CACHE_KEY_SUFFIX, DATABASE_CONNECTION_TIMEOUT_SECONDS, FOLLOWED_ARTISTS_CACHE_KEY,
+    AUTOMATIC_REFRESH_ENABLED_KEY, CACHE_KEY_SUFFIX, DATABASE_CONNECTION_TIMEOUT_SECONDS,
+    DEFAULT_AUTOMATIC_REFRESH_ENABLED, FOLLOWED_ARTISTS_CACHE_KEY,
     HISTORY_ENTRY_LIMIT, HISTORY_STATUS_FAILED, HISTORY_STATUS_IN_PROGRESS,
     HISTORY_STATUS_SUCCEEDED, HISTORY_STATUS_UNCERTAIN, ITEMS_DETAIL_SEPARATOR,
     NO_UNCERTAIN_CHANGE_ERROR,
@@ -99,6 +100,12 @@ class Store:
         with self.connect() as db:
             row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value"]) if row else default
+
+    def automatic_refresh_enabled(self):
+        enabled = self.get(AUTOMATIC_REFRESH_ENABLED_KEY, DEFAULT_AUTOMATIC_REFRESH_ENABLED)
+        if not isinstance(enabled, bool):
+            raise ValueError("Invalid automatic refresh setting")
+        return enabled
 
     def set_many(self, values, *, clear_cache=False, clear_daily_cache=False,
                  clear_request_stats=False):

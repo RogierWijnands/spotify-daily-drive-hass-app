@@ -1953,6 +1953,24 @@ class RefreshTests(unittest.TestCase):
         self.store.set_many({"playlist_id": "target", "source_ids": []})
         self.service = Refresh(self.store)
 
+    def test_disabling_automatic_refresh_does_not_block_manual_refresh(self):
+        self.store.set_many({"automatic_refresh_enabled": False})
+        api = Mock()
+        api.playlist_items.return_value = ["old"]
+        with patch("app.refresh.Spotify", return_value=api) as spotify, \
+             patch("app.refresh.build", return_value=(["new"], [], "90 minutes")):
+            self.service.run("2026-01-01 06:00")
+            spotify.assert_not_called()
+            self.assertEqual(self.store.history(), [])
+
+            self.service.run()
+            self.assertEqual(len(self.store.history()), 1)
+            api.replace.assert_called_once_with("target", ["new"])
+
+            self.store.set_many({"automatic_refresh_enabled": True})
+            self.service.run("2026-01-01 06:00")
+            self.assertEqual(len(self.store.history()), 2)
+
     def test_success_updates_history_and_used_episodes(self):
         class Fake:
             def playlist_items(self, pid):
