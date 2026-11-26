@@ -43,6 +43,17 @@ class Store:
                 CREATE TABLE IF NOT EXISTS daily_cache (
                     key TEXT PRIMARY KEY, day TEXT NOT NULL, value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS daily_requests (
+                    day TEXT PRIMARY KEY, requests INTEGER NOT NULL DEFAULT 0,
+                    errors INTEGER NOT NULL DEFAULT 0, first_quota_number INTEGER,
+                    first_quota_category TEXT, first_quota_category_number INTEGER,
+                    first_quota_at TEXT, first_quota_detail TEXT
+                );
+                CREATE TABLE IF NOT EXISTS daily_request_categories (
+                    day TEXT NOT NULL, category TEXT NOT NULL,
+                    requests INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (day, category)
+                );
             """)
             # Only a persisted pending write could have reached Spotify before a restart.
             db.execute(
@@ -126,6 +137,74 @@ class Store:
                 (key, day, json.dumps(value)),
             )
 
+    def start_request(self, category, started, detail):
+        day = started.date().isoformat()
+        with self.connect() as db:
+            # Allocate both numbers together so concurrent requests cannot share a number.
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("INSERT OR IGNORE INTO daily_requests (day) VALUES (?)", (day,))
+            db.execute(
+                "INSERT OR IGNORE INTO daily_request_categories (day, category) VALUES (?, ?)",
+                (day, category),
+            )
+            db.execute("UPDATE daily_requests SET requests=requests+1 WHERE day=?", (day,))
+            db.execute(
+                "UPDATE daily_request_categories SET requests=requests+1 WHERE day=? AND category=?",
+                (day, category),
+            )
+            total = db.execute(
+                "SELECT requests FROM daily_requests WHERE day=?", (day,)
+            ).fetchone()["requests"]
+            category_total = db.execute(
+                "SELECT requests FROM daily_request_categories WHERE day=? AND category=?",
+                (day, category),
+            ).fetchone()["requests"]
+        return day, category, total, category_total, started.isoformat(), detail
+
+    def fail_request(self, request_info, quota=False):
+        day, category, number, category_number, started, detail = request_info
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE daily_requests SET errors=errors+1 WHERE day=?", (day,))
+            db.execute(
+                "UPDATE daily_request_categories SET errors=errors+1 WHERE day=? AND category=?",
+                (day, category),
+            )
+            if quota:
+                # The first quota response wins even when requests finish out of order.
+                db.execute(
+                    """
+                    UPDATE daily_requests
+                    SET first_quota_number=?, first_quota_category=?,
+                        first_quota_category_number=?, first_quota_at=?, first_quota_detail=?
+                    WHERE day=? AND first_quota_number IS NULL
+                    """,
+                    (number, category, category_number, started, detail, day),
+                )
+
+    def request_overview(self, day):
+        with self.connect() as db:
+            # Keep the totals and categories from the same SQLite snapshot.
+            db.execute("BEGIN")
+            total = db.execute("SELECT * FROM daily_requests WHERE day=?", (day,)).fetchone()
+            categories = db.execute(
+                "SELECT category, requests, errors FROM daily_request_categories "
+                "WHERE day=? ORDER BY category",
+                (day,),
+            ).fetchall()
+        return {
+            "requests": total["requests"] if total else 0,
+            "errors": total["errors"] if total else 0,
+            "first_quota": {
+                "number": total["first_quota_number"],
+                "category": total["first_quota_category"],
+                "category_number": total["first_quota_category_number"],
+                "started": total["first_quota_at"],
+                "detail": total["first_quota_detail"],
+            } if total and total["first_quota_number"] is not None else None,
+            "categories": [dict(row) for row in categories],
+        }
+
     def clear_data(self):
         with self.connect() as db:
             # Check and clear in one write transaction so a pending write is never deleted.
@@ -136,6 +215,8 @@ class Store:
             db.execute("DELETE FROM settings WHERE key=?", (FOLLOWED_ARTISTS_CACHE_KEY,))
             db.execute("DELETE FROM episodes")
             db.execute("DELETE FROM history")
+            db.execute("DELETE FROM daily_request_categories")
+            db.execute("DELETE FROM daily_requests")
 
     def compact(self):
         # VACUUM must run outside the data-clearing transaction.

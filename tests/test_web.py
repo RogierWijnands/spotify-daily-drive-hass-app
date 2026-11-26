@@ -37,6 +37,32 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"06:00, 10:00, 14:00, 18:00, 22:00", response.data)
         self.assertEqual(self.client.post("/refresh", environ_overrides=self.remote).status_code, 403)
 
+    def test_request_overview_shows_daily_counts_and_first_quota_between_sections(self):
+        store = self.isolated_store()
+        started = datetime.now(ZoneInfo("Europe/Amsterdam"))
+        store.start_request("Liked tracks", started, "GET")
+        quota = store.start_request("Artist releases", started, "Read; artist ID artist123; offset 50")
+        store.fail_request(quota, quota=True)
+        store.start_request("Artist releases", started, "GET")
+
+        response = self.client.get("/", environ_overrides=self.remote)
+        html = response.data.decode()
+        self.assertLess(html.index("<h2>History</h2>"), html.index("<h2>Spotify requests today</h2>"))
+        self.assertLess(html.index("<h2>Spotify requests today</h2>"), html.index("<h2>Storage</h2>"))
+        self.assertIn("3 requests,\n1 error", html)
+        self.assertIn("<td>Liked tracks</td><td>1</td><td>0</td>", html)
+        self.assertIn("<td>Artist releases</td><td>2</td><td>1</td>", html)
+        self.assertIn("request 2 of the day", html)
+        self.assertIn("request 1 for\nArtist releases", html)
+        self.assertIn(started.strftime("%H:%M:%S"), html)
+        self.assertIn("Read; artist ID artist123; offset 50", html)
+
+    def test_request_overview_empty_day(self):
+        self.isolated_store()
+        response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b"No requests recorded today.", response.data)
+        self.assertIn(b"No quota or rate-limit error recorded today.", response.data)
+
     def test_history_displays_rate_limit_retry_after(self):
         entry = {"started": "2026-01-01", "status": "failed",
                  "detail": "Spotify GET /me/top/artists failed (HTTP 429); "

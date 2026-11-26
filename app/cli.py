@@ -67,7 +67,7 @@ def connect_spotify(store, client_id):
     token = token_request({
         "client_id": client_id, "grant_type": "authorization_code",
         "code": code, "redirect_uri": REDIRECT_URI, "code_verifier": verifier,
-    })
+    }, store)
     if not token.get("refresh_token"):
         raise SpotifyError(MISSING_SPOTIFY_REFRESH_TOKEN_ERROR)
     store.set_many({"refresh_token": token["refresh_token"]}, clear_cache=True)

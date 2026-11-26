@@ -213,10 +213,28 @@ An error page may appear after authorization; copy the full URL from the address
 {% for item in entry.items_list %}<li>{{ item }}</li>{% endfor %}
 </ol></details>{% endif %}</td></tr>{% endfor %}
 </table>
+<h2>Spotify requests today</h2>
+<p>{{ request_day }} ({{ timezone }}): {{ request_overview.requests }} request{{ "s" if request_overview.requests != 1 else "" }},
+{{ request_overview.errors }} error{{ "s" if request_overview.errors != 1 else "" }}. Includes Spotify API and token requests.
+Counts start when a request is started; errors include unsuccessful responses and network failures.
+Reload this page to update the overview.</p>
+{% if request_overview.first_quota %}
+<p>First observed quota or rate-limit error: request {{ request_overview.first_quota.number }} of the day,
+request {{ request_overview.first_quota.category_number }} for
+{{ request_overview.first_quota.category }}, started at {{ request_overview.first_quota.time }}.
+Request details: {{ request_overview.first_quota.detail }}.</p>
+{% else %}<p>No quota or rate-limit error recorded today.</p>{% endif %}
+{% if request_overview.categories %}
+<table><tr><th>Category</th><th>Requests</th><th>Errors</th></tr>
+{% for category in request_overview.categories %}
+<tr><td>{{ category.category }}</td><td>{{ category.requests }}</td><td>{{ category.errors }}</td></tr>
+{% endfor %}</table>
+{% else %}<p>No requests recorded today.</p>{% endif %}
+<p>These are app request counts, not Spotify's rolling quota or remaining allowance.</p>
 <h2>Storage</h2>
 <p>SQLite database: {{ storage_bytes }} bytes ({{ "%.2f" | format(storage_mib) }} MiB).
 Temporary SQLite journal files are not included.</p>
-<p>Clear cached tracks and artists, refresh history and used episodes. Settings and the Spotify
+<p>Clear cached tracks and artists, refresh history, request statistics and used episodes. Settings and the Spotify
 connection are kept. This cannot be undone and does not change the Spotify playlist.</p>
 <form action="clear-storage" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label><input style="width:auto" type="checkbox" name="confirm" required>
@@ -257,6 +275,12 @@ def home(message=None, status=HTTPStatus.OK):
                               if selection_separator else [])
         entry["items_list"] = items.splitlines() if separator else []
 
+    request_day = datetime.now(ZoneInfo(AMSTERDAM_TIMEZONE)).date().isoformat()
+    request_overview = store.request_overview(request_day)
+    if request_overview["first_quota"]:
+        request_overview["first_quota"]["time"] = datetime.fromisoformat(
+            request_overview["first_quota"]["started"]
+        ).astimezone(ZoneInfo(AMSTERDAM_TIMEZONE)).strftime("%H:%M:%S %Z")
     storage_bytes = os.path.getsize(store.path)
     return render_template_string(
         PAGE,
@@ -272,6 +296,8 @@ def home(message=None, status=HTTPStatus.OK):
         connected=bool(store.get("refresh_token")),
         pending=store.pending(),
         history=history,
+        request_day=request_day,
+        request_overview=request_overview,
         refresh_times=REFRESH_TIMES,
         timezone=AMSTERDAM_TIMEZONE,
         storage_bytes=storage_bytes,
@@ -365,7 +391,7 @@ def callback():
             data = token_request({
                 "client_id": oauth["client_id"], "grant_type": "authorization_code",
                 "code": code, "redirect_uri": REDIRECT_URI, "code_verifier": oauth["verifier"],
-            })
+            }, store)
             if not data.get("refresh_token"):
                 raise SpotifyError(MISSING_SPOTIFY_REFRESH_TOKEN_ERROR)
             store.set_many({"refresh_token": data["refresh_token"]}, clear_cache=True)

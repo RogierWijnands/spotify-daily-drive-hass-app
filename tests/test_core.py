@@ -1,7 +1,9 @@
 import os
 import random
+import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlparse
@@ -1249,6 +1251,156 @@ class SelectionTests(unittest.TestCase):
 
 
 class SpotifyTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.store = Store(os.path.join(directory.name, "requests.sqlite"))
+
+    def test_request_overview_groups_actual_requests_by_component(self):
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.token = "secret-token"
+        response = Mock(ok=True, content=b"{}", json=Mock(return_value={}))
+        requests = [
+            ("GET", "/me/top/tracks", {"time_range": "short_term"}, "Top tracks (short term)"),
+            ("GET", "/me/top/artists", {"time_range": "long_term"}, "Top artists (long term)"),
+            ("GET", "/me/player/recently-played", {}, "Recently played tracks"),
+            ("GET", "/me/tracks", {}, "Liked tracks"),
+            ("GET", "/me/following", {}, "Followed artists"),
+            ("GET", "/shows/show123/episodes", {}, "Show episodes"),
+            ("GET", "/artists/artist123/albums", {}, "Artist releases"),
+            ("GET", "/albums/album123/tracks", {}, "Release tracks"),
+            ("GET", "/playlists/playlist123/items", {}, "Playlist reads"),
+            ("PUT", "/playlists/playlist123/items", {}, "Playlist updates"),
+            ("GET", "/other", {}, "Other Spotify API requests"),
+        ]
+        with patch("app.spotify.requests.request", return_value=response):
+            for method, path, params, _ in requests:
+                api.request(method, path, params=params)
+        with patch("app.spotify.requests.post", return_value=response):
+            token_request({"grant_type": "refresh_token", "refresh_token": "private-token"}, self.store)
+
+        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        overview = self.store.request_overview(day)
+        categories = {entry["category"]: entry for entry in overview["categories"]}
+        self.assertEqual(overview["requests"], len(requests) + 1)
+        self.assertEqual(overview["errors"], 0)
+        self.assertIsNone(overview["first_quota"])
+        self.assertEqual(set(categories), {item[3] for item in requests} | {"Token requests"})
+        self.assertTrue(all(entry["requests"] == 1 for entry in categories.values()))
+        self.assertNotIn("secret", repr(overview))
+        self.assertNotIn("private-token", repr(overview))
+
+    def test_request_errors_quota_and_amsterdam_midnight_are_recorded(self):
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.token = "secret"
+        before_midnight = datetime(2026, 3, 29, 23, 59, tzinfo=ZoneInfo("Europe/Amsterdam"))
+        after_midnight = datetime(2026, 3, 30, 0, 0, tzinfo=ZoneInfo("Europe/Amsterdam"))
+        ok = Mock(ok=True, content=b"{}", json=Mock(return_value={}))
+        rate_limit = Mock(ok=False, status_code=429, headers={}, json=Mock(side_effect=ValueError()))
+        quota = Mock(ok=False, status_code=403, headers={},
+                     json=Mock(return_value={"error": {"reason": "QUOTA_EXCEEDED"}}))
+        invalid_json = Mock(ok=True, content=b"{", json=Mock(side_effect=ValueError()))
+
+        with patch("app.spotify.datetime") as clock, \
+             patch("app.spotify.requests.request", side_effect=[
+                 ok, rate_limit, quota, RequestException("network failure"), invalid_json, ok,
+             ]):
+            clock.now.side_effect = [before_midnight] * 5 + [after_midnight]
+            api.get("/me/tracks")
+            with self.assertRaises(SpotifyRateLimitError):
+                api.get("/artists/artist123/albums", offset=20, limit=10, include_groups="album,single")
+            with self.assertRaises(SpotifyError):
+                api.get("/me/tracks")
+            with self.assertRaises(RequestException):
+                api.get("/me/following")
+            with self.assertRaises(ValueError):
+                api.get("/me/tracks")
+            api.get("/me/tracks")
+
+        # A new Store instance must see the same saved numbers and first quota response.
+        overview = Store(self.store.path).request_overview("2026-03-29")
+        self.assertEqual((overview["requests"], overview["errors"]), (5, 4))
+        self.assertEqual(overview["first_quota"], {
+            "number": 2, "category": "Artist releases", "category_number": 1,
+            "started": before_midnight.isoformat(),
+            "detail": "Read; artist ID artist123; offset 20; limit 10; release types: albums and singles",
+        })
+        categories = {entry["category"]: entry for entry in overview["categories"]}
+        self.assertEqual((categories["Liked tracks"]["requests"], categories["Liked tracks"]["errors"]), (3, 2))
+        self.assertEqual((categories["Followed artists"]["requests"], categories["Followed artists"]["errors"]), (1, 1))
+        tomorrow = self.store.request_overview("2026-03-30")
+        self.assertEqual((tomorrow["requests"], tomorrow["errors"], tomorrow["first_quota"]), (1, 0, None))
+
+    def test_quota_reason_and_first_completed_response(self):
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.token = "secret"
+        quota = Mock(ok=False, status_code=403, headers={},
+                     json=Mock(return_value={"error": {"reason": "QUOTA_EXCEEDED"}}))
+        with patch("app.spotify.requests.request", return_value=quota):
+            with self.assertRaises(SpotifyError):
+                api.get("/me/tracks")
+
+        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        self.assertEqual(self.store.request_overview(day)["first_quota"]["number"], 1)
+
+        other_day = datetime(2026, 1, 1, 12, tzinfo=ZoneInfo("Europe/Amsterdam"))
+        earlier = self.store.start_request("Liked tracks", other_day, "GET")
+        later = self.store.start_request("Liked tracks", other_day, "GET; offset 50")
+        self.store.fail_request(later, quota=True)
+        self.store.fail_request(earlier, quota=True)
+        first = self.store.request_overview("2026-01-01")["first_quota"]
+        self.assertEqual((first["number"], first["category_number"], first["detail"]), (2, 2, "GET; offset 50"))
+
+        self.store.clear_data()
+        self.assertEqual(self.store.request_overview(day)["requests"], 0)
+        self.assertEqual(self.store.request_overview("2026-01-01")["categories"], [])
+
+    def test_token_quota_failure_is_counted_without_storing_credentials(self):
+        quota = Mock(ok=False, status_code=429, headers={}, json=Mock(return_value={}))
+        with patch("app.spotify.requests.post", return_value=quota):
+            with self.assertRaises(SpotifyRateLimitError):
+                token_request({"grant_type": "refresh_token", "refresh_token": "private-token"}, self.store)
+
+        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        overview = self.store.request_overview(day)
+        self.assertEqual((overview["requests"], overview["errors"]), (1, 1))
+        self.assertEqual(overview["first_quota"]["category"], "Token requests")
+        self.assertEqual(overview["first_quota"]["detail"], "Token refresh")
+        self.assertNotIn("private-token", repr(overview))
+
+    def test_concurrent_requests_get_unique_numbers(self):
+        started = datetime(2026, 1, 1, 12, tzinfo=ZoneInfo("Europe/Amsterdam"))
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            requests = list(executor.map(
+                lambda _: self.store.start_request("Liked tracks", started, "Read"), range(20)
+            ))
+        self.assertEqual({item[2] for item in requests}, set(range(1, 21)))
+        self.assertEqual({item[3] for item in requests}, set(range(1, 21)))
+        self.assertEqual(self.store.request_overview("2026-01-01")["requests"], 20)
+
+    def test_statistics_failure_does_not_replace_spotify_request_outcome(self):
+        api = Spotify.__new__(Spotify)
+        api.store = Mock()
+        api.token = "secret"
+        ok = Mock(ok=True, content=b"", json=Mock(return_value={}))
+        api.store.start_request.side_effect = sqlite3.OperationalError("database unavailable")
+        with patch("app.spotify.requests.request", return_value=ok), \
+             self.assertLogs("app.spotify", level="ERROR") as logged:
+            self.assertEqual(api.request("PUT", "/playlists/target/items"), {})
+        self.assertIn("Could not record Spotify request", logged.output[0])
+
+        api.store.start_request.side_effect = None
+        api.store.fail_request.side_effect = sqlite3.OperationalError("database unavailable")
+        failure = Mock(ok=False, status_code=429, headers={}, json=Mock(return_value={}))
+        with patch("app.spotify.requests.request", return_value=failure), \
+             self.assertLogs("app.spotify", level="ERROR") as logged, \
+             self.assertRaises(SpotifyRateLimitError):
+            api.get("/me/tracks")
+        self.assertIn("Could not record Spotify request failure", logged.output[0])
+
     def test_playlist_url_validation(self):
         pid = "0123456789ABCDEFGHIJKL"
         self.assertEqual(playlist_id("https://open.spotify.com/playlist/" + pid + "?si=test"), pid)
@@ -1632,6 +1784,7 @@ class SpotifyTests(unittest.TestCase):
 
     def test_missing_library_permission_gives_reconnect_guidance(self):
         api = Spotify.__new__(Spotify)
+        api.store = self.store
         api.token = "token"
         with patch("app.spotify.requests.request") as request:
             request.return_value.ok = False
@@ -1641,6 +1794,7 @@ class SpotifyTests(unittest.TestCase):
 
     def test_rate_limit_reports_retry_after_or_its_absence(self):
         api = Spotify.__new__(Spotify)
+        api.store = self.store
         api.token = "token"
         with patch("app.spotify.requests.request") as request:
             request.return_value.ok = False
@@ -1655,6 +1809,7 @@ class SpotifyTests(unittest.TestCase):
 
     def test_api_error_details_ignore_invalid_or_unrelated_response_data(self):
         api = Spotify.__new__(Spotify)
+        api.store = self.store
         api.token = "token"
         with patch("app.spotify.requests.request") as request:
             response = request.return_value
@@ -1678,6 +1833,7 @@ class SpotifyTests(unittest.TestCase):
 
     def test_api_error_does_not_expose_access_token(self):
         api = Spotify.__new__(Spotify)
+        api.store = self.store
         api.token = "secret-access-token"
         with patch("app.spotify.requests.request") as request:
             request.return_value.ok = False
@@ -1697,7 +1853,7 @@ class SpotifyTests(unittest.TestCase):
                 "unrelated": "do not log",
             }
             with self.assertRaises(SpotifyError) as error:
-                token_request({"refresh_token": "secret-value"})
+                token_request({"refresh_token": "secret-value"}, self.store)
         self.assertIn("Error: invalid_grant; Description: Credential [redacted] expired", str(error.exception))
         self.assertNotIn("secret-value", str(error.exception))
         self.assertNotIn("do not log", str(error.exception))
@@ -1708,7 +1864,7 @@ class SpotifyTests(unittest.TestCase):
             post.return_value.status_code = 429
             post.return_value.headers = {"Retry-After": "30"}
             with self.assertRaisesRegex(SpotifyError, "Retry-After: '30'"):
-                token_request({})
+                token_request({}, self.store)
 
 
 class RefreshTests(unittest.TestCase):
@@ -1910,6 +2066,7 @@ class RefreshTests(unittest.TestCase):
 
     def test_rate_limit_is_recorded_in_history_without_replacing(self):
         api = Spotify.__new__(Spotify)
+        api.store = self.store
         api.token = "token"
         with patch("app.refresh.Spotify", return_value=api), patch.object(
                 api, "playlist_items", return_value=["old"]), patch(
@@ -2005,6 +2162,7 @@ class RefreshTests(unittest.TestCase):
 
     def test_write_rate_limit_is_recorded_if_old_playlist_is_confirmed(self):
         api = Spotify.__new__(Spotify)
+        api.store = self.store
         api.token = "token"
         with patch("app.refresh.Spotify", return_value=api), patch.object(
                 api, "playlist_items", return_value=["old"]), patch(
@@ -2022,6 +2180,7 @@ class RefreshTests(unittest.TestCase):
 
     def test_write_rate_limit_is_recorded_if_verification_fails(self):
         api = Spotify.__new__(Spotify)
+        api.store = self.store
         api.token = "token"
         with patch("app.refresh.Spotify", return_value=api), patch(
                 "app.refresh.build", return_value=(["new"], [], "detail")), patch(

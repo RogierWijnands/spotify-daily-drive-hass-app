@@ -1,6 +1,9 @@
 import base64
 import hashlib
+import logging
 import secrets
+import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from http import HTTPStatus
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -9,13 +12,19 @@ from zoneinfo import ZoneInfo
 import requests
 
 from .constants import (
-    AMSTERDAM_TIMEZONE, API_REQUEST_TIMEOUT_SECONDS, CACHE_KEY_SUFFIX,
-    FOLLOWED_ARTISTS_CACHE_KEY, MAX_FOLLOWED_ARTISTS_REQUESTS_PER_DAY,
-    MAX_LIKED_TRACK_PAGES_PER_REFRESH, MAX_PAGINATED_ITEMS, SECURE_TOKEN_ENTROPY_BYTES,
-    PKCE_VERIFIER_ENTROPY_BYTES, SOURCE_FOLLOWED_ARTISTS, SPOTIFY_FOLLOWED_ARTISTS_PATH,
-    SPOTIFY_ID_LENGTH, SPOTIFY_LIKED_TRACKS_PATH, SPOTIFY_MARKET,
-    SPOTIFY_PAGE_SIZE, SPOTIFY_PLAYLIST_ITEMS_PATH, TOKEN_REQUEST_TIMEOUT_SECONDS,
-    ZERO_FETCH_RESULTS,
+    AMSTERDAM_TIMEZONE, API_REQUEST_TIMEOUT_SECONDS, ARTIST_DISCOVERY_RELEASE_GROUPS,
+    CACHE_KEY_SUFFIX, COLLABORATOR_RELEASE_GROUPS, FOLLOWED_ARTISTS_CACHE_KEY,
+    MAX_FOLLOWED_ARTISTS_REQUESTS_PER_DAY,
+    MAX_LIKED_TRACK_PAGES_PER_REFRESH, MAX_PAGINATED_ITEMS, PKCE_VERIFIER_ENTROPY_BYTES,
+    REQUEST_CATEGORY_ARTIST_RELEASES, REQUEST_CATEGORY_FOLLOWED_ARTISTS,
+    REQUEST_CATEGORY_LIKED_TRACKS, REQUEST_CATEGORY_OTHER, REQUEST_CATEGORY_PLAYLIST_READS,
+    REQUEST_CATEGORY_PLAYLIST_UPDATES, REQUEST_CATEGORY_RECENT_TRACKS,
+    REQUEST_CATEGORY_RELEASE_TRACKS, REQUEST_CATEGORY_SHOW_EPISODES, REQUEST_CATEGORY_TOKEN,
+    REQUEST_CATEGORY_TOP_ARTISTS, REQUEST_CATEGORY_TOP_TRACKS, SECURE_TOKEN_ENTROPY_BYTES,
+    SOURCE_FOLLOWED_ARTISTS, SPOTIFY_FOLLOWED_ARTISTS_PATH, SPOTIFY_ID_LENGTH,
+    SPOTIFY_LIKED_TRACKS_PATH, SPOTIFY_MARKET, SPOTIFY_PAGE_SIZE,
+    SPOTIFY_PLAYLIST_ITEMS_PATH, SPOTIFY_QUOTA_EXCEEDED_REASON, SPOTIFY_RECENT_TRACKS_PATH,
+    SPOTIFY_TOP_ITEMS_PATH, TOKEN_REQUEST_TIMEOUT_SECONDS, TOP_TIME_RANGE_LABELS, ZERO_FETCH_RESULTS,
 )
 
 REDIRECT_URI = "http://127.0.0.1:8888/callback"
@@ -33,6 +42,7 @@ SCOPES = " ".join(
 )
 API = "https://api.spotify.com/v1"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
+log = logging.getLogger(__name__)
 
 
 class SpotifyError(RuntimeError):
@@ -51,6 +61,106 @@ class SpotifyPartialError(SpotifyError):
 
 class SpotifyCachedError(SpotifyPartialError):
     pass
+
+
+def _request_category(method, path, params):
+    if path in (SPOTIFY_TOP_ITEMS_PATH.format(kind="tracks"),
+                SPOTIFY_TOP_ITEMS_PATH.format(kind="artists")):
+        kind = REQUEST_CATEGORY_TOP_TRACKS if path.endswith("/tracks") else REQUEST_CATEGORY_TOP_ARTISTS
+        time_range = (params or {}).get("time_range")
+        if isinstance(time_range, str) and time_range in TOP_TIME_RANGE_LABELS:
+            return f"{kind} ({TOP_TIME_RANGE_LABELS[time_range]})"
+        return kind
+
+    if path == SPOTIFY_RECENT_TRACKS_PATH:
+        return REQUEST_CATEGORY_RECENT_TRACKS
+    if path == SPOTIFY_LIKED_TRACKS_PATH:
+        return REQUEST_CATEGORY_LIKED_TRACKS
+    if path == SPOTIFY_FOLLOWED_ARTISTS_PATH:
+        return REQUEST_CATEGORY_FOLLOWED_ARTISTS
+
+    parts = path.strip("/").split("/")
+    if len(parts) == 3:
+        if parts[0] == "shows" and parts[2] == "episodes":
+            return REQUEST_CATEGORY_SHOW_EPISODES
+        if parts[0] == "artists" and parts[2] == "albums":
+            return REQUEST_CATEGORY_ARTIST_RELEASES
+        if parts[0] == "albums" and parts[2] == "tracks":
+            return REQUEST_CATEGORY_RELEASE_TRACKS
+        if parts[0] == "playlists" and parts[2] == "items":
+            return REQUEST_CATEGORY_PLAYLIST_READS if method == "GET" else REQUEST_CATEGORY_PLAYLIST_UPDATES
+
+    return REQUEST_CATEGORY_OTHER
+
+
+def _request_detail(method, path, params, category):
+    labels = {
+        REQUEST_CATEGORY_SHOW_EPISODES: "show",
+        REQUEST_CATEGORY_ARTIST_RELEASES: "artist",
+        REQUEST_CATEGORY_RELEASE_TRACKS: "release",
+        REQUEST_CATEGORY_PLAYLIST_READS: "playlist",
+        REQUEST_CATEGORY_PLAYLIST_UPDATES: "playlist",
+    }
+    detail = {"GET": "Read", "PUT": "Update"}.get(method, method)
+
+    if category in labels:
+        parts = path.strip("/").split("/")
+        resource_id = parts[1]
+        if resource_id.isascii() and resource_id.isalnum():
+            detail += f"; {labels[category]} ID {resource_id}"
+
+    # Only keep known, non-secret parameters needed to identify the failed request.
+    for key in ("offset", "limit"):
+        value = (params or {}).get(key)
+        if type(value) is int and value >= 0:
+            detail += f"; {key} {value}"
+
+    release_types = {
+        ARTIST_DISCOVERY_RELEASE_GROUPS: "albums, singles and appearances",
+        COLLABORATOR_RELEASE_GROUPS: "albums and singles",
+    }
+    groups = (params or {}).get("include_groups")
+    if category == REQUEST_CATEGORY_ARTIST_RELEASES and isinstance(groups, str) and groups in release_types:
+        detail += f"; release types: {release_types[groups]}"
+
+    after = (params or {}).get("after")
+    if (category == REQUEST_CATEGORY_FOLLOWED_ARTISTS and isinstance(after, str)
+            and after.isascii() and after.isalnum()):
+        detail += f"; after artist ID {after}"
+    return detail
+
+
+def _is_quota_response(response):
+    if response.status_code == HTTPStatus.TOO_MANY_REQUESTS:
+        return True
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    return isinstance(error, dict) and error.get("reason") == SPOTIFY_QUOTA_EXCEEDED_REASON
+
+
+@contextmanager
+def _tracked_request(store, category, detail):
+    started = datetime.now(ZoneInfo(AMSTERDAM_TIMEZONE))
+    try:
+        request_info = store.start_request(category, started, detail)
+    except sqlite3.Error:
+        # A statistics failure must not stop or repeat a Spotify playlist write.
+        log.exception("Could not record Spotify request")
+        request_info = None
+
+    outcome = {"quota": False}
+    try:
+        yield outcome
+    except (SpotifyError, requests.RequestException, ValueError):
+        if request_info is not None:
+            try:
+                store.fail_request(request_info, quota=outcome["quota"])
+            except sqlite3.Error:
+                log.exception("Could not record Spotify request failure")
+        raise
 
 
 def _request_error(response, message, sensitive_values=()):
@@ -149,16 +259,23 @@ def callback_code(url, state):
     return params["code"][0]
 
 
-def token_request(data):
-    response = requests.post(TOKEN_URL, data=data, timeout=TOKEN_REQUEST_TIMEOUT_SECONDS)
-    if not response.ok:
-        sensitive = [
-            data.get(key) for key in ("code", "code_verifier", "refresh_token", "client_secret")
-        ]
-        raise _request_error(
-            response, f"Spotify token request failed (HTTP {response.status_code})", sensitive
-        )
-    return response.json()
+def token_request(data, store):
+    grant_type = data.get("grant_type")
+    detail = {
+        "refresh_token": "Token refresh",
+        "authorization_code": "Authorization code exchange",
+    }.get(grant_type, "Token request")
+    with _tracked_request(store, REQUEST_CATEGORY_TOKEN, detail) as outcome:
+        response = requests.post(TOKEN_URL, data=data, timeout=TOKEN_REQUEST_TIMEOUT_SECONDS)
+        if not response.ok:
+            outcome["quota"] = _is_quota_response(response)
+            sensitive = [
+                data.get(key) for key in ("code", "code_verifier", "refresh_token", "client_secret")
+            ]
+            raise _request_error(
+                response, f"Spotify token request failed (HTTP {response.status_code})", sensitive
+            )
+        return response.json()
 
 
 class Spotify:
@@ -171,40 +288,46 @@ class Spotify:
 
         # Refresh tokens may rotate; save a replacement without clearing the cache.
         token = token_request(
-            {"grant_type": "refresh_token", "refresh_token": refresh, "client_id": client_id}
+            {"grant_type": "refresh_token", "refresh_token": refresh, "client_id": client_id},
+            self.store,
         )
         if token.get("refresh_token"):
             store.set_many({"refresh_token": token["refresh_token"]})
         self.token = token["access_token"]
 
     def request(self, method, path, **kwargs):
-        response = requests.request(
-            method, API + path, headers={"Authorization": "Bearer " + self.token},
-            timeout=API_REQUEST_TIMEOUT_SECONDS, **kwargs,
-        )
-        if not response.ok:
-            if path == SPOTIFY_LIKED_TRACKS_PATH and response.status_code == HTTPStatus.FORBIDDEN:
-                raise _request_error(
-                    response,
-                    f"Liked tracks are inaccessible (HTTP {HTTPStatus.FORBIDDEN}); "
-                    "reconnect Spotify and grant library access",
-                    (self.token,),
-                )
-            if path == SPOTIFY_FOLLOWED_ARTISTS_PATH and response.status_code in (
-                HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN
-            ):
-                raise _request_error(
-                    response,
-                    f"Followed artists are inaccessible (HTTP {response.status_code}); "
-                    "reconnect Spotify and grant access to followed artists",
-                    (self.token,),
-                )
-            raise _request_error(
-                response,
-                f"Spotify {method} {path} failed (HTTP {response.status_code})",
-                (self.token,),
+        params = kwargs.get("params")
+        category = _request_category(method, path, params)
+        detail = _request_detail(method, path, params, category)
+        with _tracked_request(self.store, category, detail) as outcome:
+            response = requests.request(
+                method, API + path, headers={"Authorization": "Bearer " + self.token},
+                timeout=API_REQUEST_TIMEOUT_SECONDS, **kwargs,
             )
-        return response.json() if response.content else {}
+            if not response.ok:
+                outcome["quota"] = _is_quota_response(response)
+                if path == SPOTIFY_LIKED_TRACKS_PATH and response.status_code == HTTPStatus.FORBIDDEN:
+                    raise _request_error(
+                        response,
+                        f"Liked tracks are inaccessible (HTTP {HTTPStatus.FORBIDDEN}); "
+                        "reconnect Spotify and grant library access",
+                        (self.token,),
+                    )
+                if path == SPOTIFY_FOLLOWED_ARTISTS_PATH and response.status_code in (
+                    HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN
+                ):
+                    raise _request_error(
+                        response,
+                        f"Followed artists are inaccessible (HTTP {response.status_code}); "
+                        "reconnect Spotify and grant access to followed artists",
+                        (self.token,),
+                    )
+                raise _request_error(
+                    response,
+                    f"Spotify {method} {path} failed (HTTP {response.status_code})",
+                    (self.token,),
+                )
+            return response.json() if response.content else {}
 
     def get(self, path, **params):
         return self.request("GET", path, params=params)
