@@ -31,7 +31,7 @@ csrf = secrets.token_urlsafe(32)
 # OAuth state is transient; refresh.lock protects account changes during a refresh.
 oauth = {}
 oauth_lock = threading.Lock()
-REFRESH_TIMES = ("06:00", "13:00", "19:00")
+REFRESH_TIMES = ("06:00", "10:00", "14:00", "18:00", "22:00")
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">

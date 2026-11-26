@@ -34,7 +34,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'<html lang="en">', response.data)
         self.assertIn(b"Connect Spotify", response.data)
-        self.assertIn(b"06:00, 13:00, 19:00", response.data)
+        self.assertIn(b"06:00, 10:00, 14:00, 18:00, 22:00", response.data)
         self.assertEqual(self.client.post("/refresh", environ_overrides=self.remote).status_code, 403)
 
     def test_history_displays_rate_limit_retry_after(self):
@@ -216,7 +216,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(store.used_episodes(), {"episode"})
         self.assertEqual(len(store.history()), 1)
 
-    def test_scheduler_runs_three_times_in_amsterdam_time(self):
+    def test_scheduler_runs_five_times_in_amsterdam_time(self):
         amsterdam = ZoneInfo("Europe/Amsterdam")
 
         for date in ((2026, 1, 15), (2026, 7, 15)):
@@ -236,7 +236,7 @@ class WebTests(unittest.TestCase):
 
                 self.assertEqual(run.call_args_list, [
                     call(f"{date[0]:04}-{date[1]:02}-{date[2]:02} {hour:02}:00")
-                    for hour in (6, 13, 19)
+                    for hour in (6, 10, 14, 18, 22)
                 ])
                 self.assertEqual(clock.now.call_count, 26)
                 self.assertTrue(all(c.args[0].key == "Europe/Amsterdam" for c in clock.now.call_args_list))
