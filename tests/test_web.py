@@ -58,6 +58,19 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"Liked tracks: retrieved from today&#39;s cache.", response.data)
         self.assertIn(b"Recently played tracks: Spotify fetch failed; no data retrieved from cache.", response.data)
 
+    def test_history_displays_cached_sources_and_current_errors(self):
+        entry = {"started": "2026-01-01", "status": "succeeded",
+                 "detail": "90 minutes\nSelection:\n"
+                           "News show: 1 previously fetched episode reused from today's cache.\n"
+                           "Liked tracks: Spotify fetch failed; reused cache from 2025-12-31.\n"
+                           "Source warning: Spotify failed (HTTP 429); Retry-After: '45'"}
+        with patch.object(web.store, "history", return_value=[entry]):
+            response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b"News show: 1 previously fetched episode reused from today&#39;s cache.", response.data)
+        self.assertIn(b"Liked tracks: Spotify fetch failed; reused cache from 2025-12-31.", response.data)
+        self.assertIn(b"HTTP 429", response.data)
+        self.assertIn(b"Retry-After: &#39;45&#39;", response.data)
+
     def test_history_expands_tracks_and_keeps_old_details_readable(self):
         store = self.isolated_store()
         store.finish(store.start(), "failed", "Old error message")
@@ -146,11 +159,13 @@ class WebTests(unittest.TestCase):
             web.refresh.lock.release()
         self.assertEqual(response.status_code, 409)
         self.assertIsNotNone(web.store.get_cached("liked_tracks_cache", "2026-01-01"))
+        self.assertIsNotNone(web.store.get_previous_cached("liked_tracks_cache", "2026-01-02"))
         self.assertIsNotNone(web.store.get("followed_artists_cache"))
         with patch("app.web.token_request", return_value={"refresh_token": "new"}):
             response = self.client.post("/callback", data=data, environ_overrides=self.remote)
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(web.store.get_cached("liked_tracks_cache", "2026-01-01"))
+        self.assertIsNone(web.store.get_previous_cached("liked_tracks_cache", "2026-01-02"))
         self.assertIsNone(web.store.get("followed_artists_cache"))
 
     def test_changing_client_id_clears_cache(self):

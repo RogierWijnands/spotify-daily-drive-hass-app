@@ -76,11 +76,16 @@ class Store:
             )
 
     def get_cached(self, key, day):
-        # Expired days are removed lazily when the cache is next accessed.
+        # Episodes are usable only on their fetch day; music can serve as an older fallback.
         with self.connect() as db:
-            db.execute("DELETE FROM daily_cache WHERE day != ?", (day,))
-            row = db.execute("SELECT value FROM daily_cache WHERE key=?", (key,)).fetchone()
+            db.execute("DELETE FROM daily_cache WHERE day != ? AND key GLOB 'show_episodes_*_cache'", (day,))
+            row = db.execute("SELECT value FROM daily_cache WHERE key=? AND day=?", (key, day)).fetchone()
         return json.loads(row["value"]) if row else None
+
+    def get_previous_cached(self, key, day):
+        with self.connect() as db:
+            row = db.execute("SELECT day, value FROM daily_cache WHERE key=? AND day<?", (key, day)).fetchone()
+        return (row["day"], json.loads(row["value"])) if row else None
 
     def set_cached(self, key, day, value):
         with self.connect() as db:

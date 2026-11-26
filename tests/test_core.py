@@ -37,6 +37,12 @@ class UncachedSpotify:
     def liked_tracks(self, rng):
         return self.pages("/me/tracks", {"market": "NL"}, max_items=None)
 
+    def cached_today(self, key):
+        return None
+
+    def cache_today(self, key, value):
+        pass
+
 
 class SelectionTests(unittest.TestCase):
     def test_selects_current_and_old_and_meets_duration(self):
@@ -78,7 +84,7 @@ class SelectionTests(unittest.TestCase):
                 self.assertEqual(sum(item["duration_ms"] for item in music + podcasts), total_minutes * 60000)
 
     def test_fetches_and_mixes_four_news_and_two_other_podcasts(self):
-        class Fake:
+        class Fake(UncachedSpotify):
             def get(self, path, **params):
                 show = path.split("/")[2]
                 return {"next": None, "items": [
@@ -105,7 +111,7 @@ class SelectionTests(unittest.TestCase):
         self.assertLessEqual(max(gaps) - min(gaps), 1)
 
     def test_fourth_news_episode_can_come_from_next_page(self):
-        class Fake:
+        class Fake(UncachedSpotify):
             def get(self, path, **params):
                 show = path.split("/")[2]
                 offset = params["offset"]
@@ -156,7 +162,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(detail, "90 minutes; 0 music tracks\nItems:\n[Episode] spotify:episode:1")
 
     def test_unavailable_configured_episodes_are_logged_and_skipped(self):
-        class Fake:
+        class Fake(UncachedSpotify):
             def get(self, path, **params):
                 return {"items": [], "next": None}
         with self.assertLogs("app.selection", level="WARNING") as logs:
@@ -164,7 +170,7 @@ class SelectionTests(unittest.TestCase):
         self.assertIn("news", "\n".join(logs.output))
 
     def test_podcast_failure_keeps_available_episodes_and_continues_other_shows(self):
-        class Fake:
+        class Fake(UncachedSpotify):
             def get(self, path, **params):
                 if path == "/shows/first/episodes" and params["offset"]:
                     raise RequestException("page unavailable")
@@ -178,6 +184,98 @@ class SelectionTests(unittest.TestCase):
                                         [{"show": "second", "count": 1}])
         self.assertEqual([item["uri"] for item in result], ["episode:first", "episode:second"])
         self.assertIn("page unavailable", "\n".join(logs.output))
+
+    def test_news_and_podcasts_use_today_cache_only_after_errors(self):
+        def episode(show, number):
+            return {"type": "episode", "uri": f"spotify:episode:{show}-{number}", "name": f"{show}-{number}",
+                    "duration_ms": 5 * 60000, "is_playable": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            class Fake(Spotify):
+                def __init__(self):
+                    self.store = Store(os.path.join(directory, "cache.sqlite"))
+                    self.mode = "fresh"
+                    self.calls = []
+
+                def get(self, path, **params):
+                    self.calls.append(path)
+                    show = path.split("/")[2]
+                    if self.mode == "failed":
+                        if show == "news":
+                            raise SpotifyRateLimitError("News unavailable; Retry-After: '45'")
+                        raise RequestException("Podcast unavailable")
+                    number = 2 if self.mode == "new" else 0
+                    count = 2 if show == "news" else 1
+                    return {"items": [episode(show, number + i) for i in range(count)], "next": None}
+
+            api = Fake()
+            news = [{"show": "news", "count": 2}]
+            podcasts = [{"show": "podcast", "count": 1}]
+            with patch("app.spotify.datetime") as clock:
+                clock.now.side_effect = lambda tz: datetime(2026, 1, 15, 22, 30, tzinfo=timezone.utc).astimezone(tz)
+                first = podcast_candidates(api, news, podcasts)
+                api.store = Store(api.store.path)
+                api.mode = "failed"
+                with patch("app.selection.music_candidates", return_value=[[track(i) for i in range(25)]]), \
+                        self.assertLogs("app.selection", level="WARNING"):
+                    uris, episode_uris, detail = build(api, [], news, podcasts, random.Random(1))
+                self.assertEqual(episode_uris, [item["uri"] for item in first])
+                self.assertTrue(set(episode_uris).issubset(uris))
+                history_id = api.store.start()
+                api.store.finish(history_id, "succeeded", detail)
+                saved = api.store.history()[0]["detail"]
+                self.assertIn("News show news: 2/2 requested episodes selected", saved)
+                self.assertIn("2 previously fetched episodes reused from today's cache after a Spotify error.", saved)
+                self.assertIn("Podcast show podcast: 1/1 requested episodes selected", saved)
+                self.assertIn("1 previously fetched episode reused from today's cache after a Spotify error.", saved)
+                self.assertIn("News unavailable; Retry-After: '45'", saved)
+                self.assertIn("Podcast unavailable", saved)
+
+                api.mode = "new"
+                trace, issues = [], []
+                new = podcast_candidates(api, news, podcasts, issues, trace)
+                self.assertNotEqual([item["uri"] for item in new], episode_uris)
+                self.assertEqual(issues, [])
+                self.assertNotIn("reused from today's cache", "\n".join(trace))
+                self.assertNotIn("unavailable", "\n".join(trace))
+
+                clock.now.side_effect = lambda tz: datetime(2026, 1, 15, 23, 0, tzinfo=timezone.utc).astimezone(tz)
+                api.mode = "failed"
+                trace = []
+                with self.assertLogs("app.selection", level="WARNING"):
+                    self.assertEqual(podcast_candidates(api, news, podcasts, trace=trace), [])
+                self.assertIn("No episodes from today's cache were available.", "\n".join(trace))
+                self.assertEqual(api.calls.count("/shows/news/episodes"), 4)
+                self.assertEqual(api.calls.count("/shows/podcast/episodes"), 4)
+
+    def test_partial_episode_fetch_prefers_fresh_and_preserves_cached_episodes(self):
+        def episode(name):
+            return {"type": "episode", "uri": f"spotify:episode:{name}", "duration_ms": 60000,
+                    "is_playable": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            class Fake(Spotify):
+                def __init__(self):
+                    self.store = Store(os.path.join(directory, "cache.sqlite"))
+                    self.fail_first_page = False
+
+                def get(self, path, **params):
+                    if self.fail_first_page or params["offset"]:
+                        raise SpotifyError("episode page unavailable")
+                    return {"items": [episode("new"), episode("old")], "next": "next"}
+
+            api = Fake()
+            api.cache_today("show_episodes_news_cache", [episode("old"), episode("older")])
+            trace = []
+            with self.assertLogs("app.selection", level="WARNING"):
+                result = podcast_candidates(api, [{"show": "news", "count": 3}], [], trace=trace)
+            self.assertEqual([item["uri"] for item in result],
+                             ["spotify:episode:new", "spotify:episode:old", "spotify:episode:older"])
+            self.assertIn("1 previously fetched episode reused from today's cache", "\n".join(trace))
+            api.fail_first_page = True
+            with self.assertLogs("app.selection", level="WARNING"):
+                again = podcast_candidates(api, [{"show": "news", "count": 3}], [])
+            self.assertEqual([item["uri"] for item in again], [item["uri"] for item in result])
 
     def test_failed_music_sources_leave_other_sources_available(self):
         class Fake(UncachedSpotify):
@@ -273,7 +371,7 @@ class SelectionTests(unittest.TestCase):
         self.assertCountEqual([item["id"] for item in groups[0]], ["unknown", "unknown", "unavailable"])
 
     def test_selects_configured_show_counts_and_interleaves_categories(self):
-        class Fake:
+        class Fake(UncachedSpotify):
             def get(self, path, **params):
                 show = path.split("/")[2]
                 return {"items": [{"type": "episode", "uri": f"{show}:{i}",
@@ -1031,6 +1129,99 @@ class SelectionTests(unittest.TestCase):
             self.assertIn("Top tracks short term: retrieved from Spotify and saved in today's cache.", trace)
             self.assertIn("Top artists short term: retrieved from Spotify and saved in today's cache.", trace)
             self.assertIn("Recently played tracks: retrieved from Spotify and saved in today's cache.", trace)
+
+    def test_failed_music_sources_use_older_cache_and_report_current_errors(self):
+        def song(number):
+            return {"id": str(number), "type": "track", "uri": f"spotify:track:{number}",
+                    "duration_ms": 4 * 60000}
+
+        with tempfile.TemporaryDirectory() as directory:
+            class Fake(Spotify):
+                def __init__(self):
+                    self.store = Store(os.path.join(directory, "cache.sqlite"))
+                    self.fail = True
+                    self.calls = []
+
+                def get(self, path, **params):
+                    self.calls.append((path, params))
+                    if self.fail:
+                        raise SpotifyRateLimitError("Spotify unavailable; Retry-After: '32'")
+                    return {"items": []}
+
+                def liked_tracks(self, rng):
+                    if self.fail:
+                        raise RequestException("Liked tracks unavailable")
+                    return []
+
+                def followed_artists(self, trace=None):
+                    return []
+
+            class FixedRange(random.Random):
+                def choice(self, options):
+                    return "short_term"
+
+            api = Fake()
+            old_day = "2026-01-15"
+            for term, number in (("short", 0), ("medium", 1), ("long", 2)):
+                api.store.set_cached(f"top_tracks_{term}_term_cache", old_day, [song(number)])
+            api.store.set_cached("top_artists_short_term_cache", old_day, [])
+            api.store.set_cached("recently_played_tracks_cache", old_day, [{"track": song(3)}])
+            api.store.set_cached("liked_tracks_cache", old_day, [{"track": song(i)} for i in range(25)])
+
+            with patch("app.spotify.datetime") as clock:
+                clock.now.return_value = datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
+                issues, trace = [], []
+                with self.assertLogs("app.selection", level="WARNING"):
+                    groups = music_candidates(api, [], FixedRange(1), issues, trace)
+                self.assertIn("3", [item["id"] for item in groups[0]])
+                self.assertEqual(len(groups[4]), 25)
+                for label in ("Top tracks short term", "Top tracks medium term", "Top tracks long term",
+                              "Top artists short term", "Recently played tracks", "Liked tracks"):
+                    self.assertIn(f"{label}: Spotify fetch failed; reused cache from {old_day}.", trace)
+                self.assertIn("Retry-After: '32'", "\n".join(issues))
+                self.assertIn("Liked tracks unavailable", "\n".join(issues))
+                self.assertIsNone(api.store.get_cached("liked_tracks_cache", "2026-01-16"))
+
+                with self.assertLogs("app.selection", level="WARNING"):
+                    _, _, detail = build(api, [], [], [], FixedRange(1))
+                history_id = api.store.start()
+                api.store.finish(history_id, "succeeded", detail)
+                saved = api.store.history()[0]["detail"]
+                self.assertIn(f"Liked tracks: Spotify fetch failed; reused cache from {old_day}.", saved)
+                self.assertIn("Source warning: Using cached liked tracks after an error: Liked tracks unavailable",
+                              saved)
+                self.assertIn("Retry-After: '32'", saved)
+
+                api.fail = False
+                issues, trace = [], []
+                groups = music_candidates(api, [], FixedRange(1), issues, trace)
+                self.assertFalse(any(groups))
+                self.assertEqual(issues, [])
+                self.assertIn("Liked tracks: retrieved from Spotify and saved in today's cache.", trace)
+                self.assertNotIn("unavailable", "\n".join(trace))
+                self.assertIsNone(api.store.get_previous_cached("liked_tracks_cache", "2026-01-16"))
+
+    def test_partial_fresh_music_takes_priority_over_older_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            api = Spotify.__new__(Spotify)
+            api.store = Store(os.path.join(directory, "cache.sqlite"))
+            api.store.set_cached("liked_tracks_cache", "2026-01-15", [{"track": {"id": "old"}}])
+            partial = [{"track": {"id": "new"}}]
+
+            def fetch():
+                raise SpotifyPartialError(SpotifyError("later page unavailable"), partial)
+
+            with patch("app.spotify.datetime") as clock:
+                clock.now.return_value = datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
+                trace, issues = [], []
+                with self.assertLogs("app.selection", level="WARNING"):
+                    result = get_api_items(
+                        "liked tracks", lambda: api.daily_cached("liked_tracks_cache", fetch, trace), issues)
+                self.assertEqual(result, partial)
+                self.assertIn("later page unavailable", "\n".join(issues))
+                self.assertIn("Liked tracks: partially retrieved from Spotify during this refresh; not cached.", trace)
+                self.assertEqual(api.store.get_previous_cached("liked_tracks_cache", "2026-01-16"),
+                                 ("2026-01-15", [{"track": {"id": "old"}}]))
 
 
 class SpotifyTests(unittest.TestCase):

@@ -4,7 +4,7 @@ from itertools import islice, zip_longest
 
 from requests import RequestException
 
-from .spotify import SpotifyError, SpotifyPartialError
+from .spotify import SpotifyCachedError, SpotifyError, SpotifyPartialError
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +39,9 @@ def get_api_items(source, fetch, issues=None):
         if not isinstance(result, list):
             raise SpotifyError("Spotify returned an invalid item list")
         return result
+    except SpotifyCachedError as exc:
+        api_warning(issues, "Using cached %s after an error: %s", source, exc)
+        return exc.items
     except SpotifyPartialError as exc:
         # A later page failed, but the items from earlier pages can still be used.
         api_warning(issues, "Using partial %s after an error: %s", source, exc)
@@ -61,6 +64,7 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
             show, count = entry["show"], entry["count"]
             current = []
             offset = 0
+            failed = False
 
             while len(current) < count:
                 try:
@@ -68,7 +72,8 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
                     if not isinstance(page, dict) or not isinstance(page.get("items"), list):
                         raise SpotifyError("Spotify returned an invalid episode page")
                 except (SpotifyError, RequestException) as exc:
-                    api_warning(issues, "Skipping remaining episodes for show %s: %s", show, exc)
+                    api_warning(issues, "Failed to fetch remaining episodes for show %s: %s", show, exc)
+                    failed = True
                     break
                 for item in page["items"]:
                     if valid(item, "episode") and item["uri"] not in seen:
@@ -80,14 +85,54 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
                     break
                 offset += len(page["items"])
 
+            # Use today's earlier episodes only after a Spotify error, keeping fresh results first.
+            fetched = list(current)
+            cache_key = f"show_episodes_{show}_cache"
+            cached = api.cached_today(cache_key)
+            if cached is None:
+                cached = []
+            if not isinstance(cached, list):
+                raise SpotifyError(f"Invalid cached episodes for show {show}")
+
+            reused = 0
+            if failed:
+                for item in cached:
+                    if valid(item, "episode") and item["uri"] not in seen:
+                        current.append(item)
+                        seen.add(item["uri"])
+                        reused += 1
+                        if len(current) == count:
+                            break
+
+            # Keep today's newest fetched episodes, including successful pages before an error.
+            if fetched:
+                saved = []
+                saved_uris = set()
+                for item in fetched + cached:
+                    if valid(item, "episode") and item["uri"] not in saved_uris:
+                        saved.append(item)
+                        saved_uris.add(item["uri"])
+                        if len(saved) >= max(count, len(cached)):
+                            break
+                api.cache_today(cache_key, saved)
+
             if len(current) != count:
                 api_warning(issues, "Show %s has %s of %s requested playable episodes", show, len(current), count)
             episodes.extend(current)
             if trace is not None:
                 titles = [item["name"] if isinstance(item.get("name"), str) and item["name"].strip()
                           else item["uri"] for item in current]
+                selection = ("using available playable episodes" if failed else "using the latest playable episodes")
+                cache_detail = ""
+                if failed:
+                    if reused:
+                        noun = "episode" if reused == 1 else "episodes"
+                        cache_detail = f" {reused} previously fetched {noun} reused from today's cache after a Spotify error."
+                    else:
+                        cache_detail = " No episodes from today's cache were available."
                 trace.append(f"{category} show {show}: {len(current)}/{count} requested episodes selected, "
-                             "using the latest playable episodes and excluding duplicates."
+                             f"{selection} and excluding duplicates."
+                             + cache_detail
                              + (f" Selected: {', '.join(titles)}." if titles else ""))
 
     if trace is not None and not news_shows and not podcast_shows:

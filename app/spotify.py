@@ -27,6 +27,10 @@ class SpotifyPartialError(SpotifyError):
         self.items = items
 
 
+class SpotifyCachedError(SpotifyPartialError):
+    pass
+
+
 def _request_error(response, message, sensitive_values=()):
     try:
         body = response.json()
@@ -164,6 +168,14 @@ class Spotify:
     def get(self, path, **params):
         return self.request("GET", path, params=params)
 
+    def cached_today(self, key):
+        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        return self.store.get_cached(key, day)
+
+    def cache_today(self, key, value):
+        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        self.store.set_cached(key, day, value)
+
     def daily_cached(self, key, fetch, trace=None):
         day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
         cached = self.store.get_cached(key, day)
@@ -177,11 +189,21 @@ class Spotify:
 
         try:
             result = fetch()
-        except SpotifyPartialError:
-            if trace is not None:
-                trace.append(f"{label}: partially retrieved from Spotify during this refresh; not cached.")
-            raise
-        except (SpotifyError, requests.RequestException):
+        except (SpotifyError, requests.RequestException) as exc:
+            if isinstance(exc, SpotifyPartialError) and exc.items:
+                if trace is not None:
+                    trace.append(f"{label}: partially retrieved from Spotify during this refresh; not cached.")
+                raise
+
+            previous = self.store.get_previous_cached(key, day)
+            if previous is not None:
+                cached_day, cached = previous
+                if not isinstance(cached, list):
+                    raise SpotifyError(f"Invalid cached data for {label}") from exc
+                if trace is not None:
+                    trace.append(f"{label}: Spotify fetch failed; reused cache from {cached_day}.")
+                raise SpotifyCachedError(exc, cached) from exc
+
             if trace is not None:
                 trace.append(f"{label}: Spotify fetch failed; no data retrieved from cache.")
             raise
