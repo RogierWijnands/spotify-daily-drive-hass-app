@@ -382,4 +382,22 @@ def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None):
 
 def build(api, playlist_ids, news_shows, podcast_shows, rng=None):
     items, episodes, detail = build_items(api, playlist_ids, news_shows, podcast_shows, rng)
+    episode_uris = set(episodes)
+    detail += f"; {sum(item['uri'] not in episode_uris for item in items)} music tracks"
+    if items:
+        labels = []
+        for item in items:
+            title = item.get("name")
+            title = title if isinstance(title, str) and title.strip() else item["uri"]
+            if item["uri"] in episode_uris:
+                label = f"[Episode] {title}"
+            else:
+                artists = item.get("artists")
+                artists = artists if isinstance(artists, list) else []
+                names = [artist["name"] for artist in artists
+                         if isinstance(artist, dict) and isinstance(artist.get("name"), str)
+                         and artist["name"].strip()]
+                label = f"{', '.join(names)} - {title}" if names else title
+            labels.append(" ".join(label.split()))
+        detail += "\nItems:\n" + "\n".join(labels)
     return [item["uri"] for item in items], episodes, detail

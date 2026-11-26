@@ -123,6 +123,29 @@ class SelectionTests(unittest.TestCase):
         self.assertLessEqual(abs(sum(item["duration_ms"] for item in items) - 90 * 60000), 2 * 60000)
         self.assertIn("podcasts 0.0%", detail)
 
+    def test_build_records_music_and_episode_names_in_playlist_order(self):
+        items = [
+            {"uri": "spotify:track:1", "name": "First\nSong",
+             "artists": [{"name": "Artist"}, {"name": "Guest"}]},
+            {"uri": "spotify:episode:1", "name": "Podcast"},
+            {"uri": "spotify:track:2", "artists": None},
+            {"uri": "spotify:episode:2", "name": "News"},
+        ]
+        episode_uris = ["spotify:episode:1", "spotify:episode:2"]
+        with patch("app.selection.build_items", return_value=(items, episode_uris, "90 minutes")):
+            uris, episodes, detail = build(object(), [], [], [])
+        self.assertEqual(uris, [item["uri"] for item in items])
+        self.assertEqual(episodes, episode_uris)
+        self.assertEqual(detail, "90 minutes; 2 music tracks\nItems:\n"
+                                 "Artist, Guest - First Song\n[Episode] Podcast\n"
+                                 "spotify:track:2\n[Episode] News")
+
+    def test_build_reports_zero_music_tracks(self):
+        items = [{"uri": "spotify:episode:1"}]
+        with patch("app.selection.build_items", return_value=(items, ["spotify:episode:1"], "90 minutes")):
+            _, _, detail = build(object(), [], [], [])
+        self.assertEqual(detail, "90 minutes; 0 music tracks\nItems:\n[Episode] spotify:episode:1")
+
     def test_unavailable_configured_episodes_are_logged_and_skipped(self):
         class Fake:
             def get(self, path, **params):
@@ -1058,6 +1081,19 @@ class RefreshTests(unittest.TestCase):
         self.assertIsNone(self.store.pending())
         self.assertEqual(len(self.store.history()), 1)
 
+    def test_success_persists_selected_music_in_history(self):
+        items = [{"uri": "spotify:track:1", "name": "Song", "artists": [{"name": "Artist"}]},
+                 {"uri": "spotify:episode:1", "name": "Episode"}]
+        with patch("app.refresh.Spotify") as spotify, patch(
+                "app.selection.build_items", return_value=(items, ["spotify:episode:1"], "90 minutes")):
+            spotify.return_value.playlist_items.return_value = ["old"]
+            self.service.run()
+        spotify.return_value.replace.assert_called_once_with("target", [item["uri"] for item in items])
+        entry = self.store.history()[0]
+        self.assertEqual(entry["status"], "succeeded")
+        self.assertEqual(entry["detail"], "90 minutes; 1 music tracks\nItems:\n"
+                                          "Artist - Song\n[Episode] Episode")
+
     def test_refresh_passes_configured_shows_to_selection(self):
         self.store.set_many({"news_shows": NEWS_SHOWS, "podcast_shows": PODCAST_SHOWS})
         with patch("app.refresh.Spotify") as spotify, patch(
@@ -1095,6 +1131,43 @@ class RefreshTests(unittest.TestCase):
         self.assertTrue(self.service.reconcile(Recovered()))
         self.assertEqual(self.store.history()[0]["status"], "succeeded")
         self.assertEqual(self.store.used_episodes(), {"episode"})
+
+    def test_reconciled_history_keeps_music_list_and_repeated_episode_note(self):
+        episode = "spotify:episode:1"
+        self.store.prepare(self.store.start(), "target", [], [episode], [episode], "old")
+        self.store.resolve(True)
+        items = [{"uri": "spotify:track:1", "name": "Song", "artists": [{"name": "Artist"}]},
+                 {"uri": episode}]
+
+        class Fake:
+            def __init__(self):
+                self.calls = 0
+
+            def playlist_items(self, pid):
+                self.calls += 1
+                if self.calls == 1:
+                    return ["old"]
+                raise SpotifyError("unreachable")
+
+            def replace(self, pid, uris):
+                raise TimeoutError("timeout")
+
+        with patch("app.refresh.Spotify", return_value=Fake()), patch(
+                "app.selection.build_items", return_value=(items, [episode], "90 minutes")):
+            with self.assertRaises(SpotifyError):
+                self.service.run()
+
+        class Recovered:
+            def playlist_items(self, pid):
+                return [item["uri"] for item in items]
+
+        self.assertTrue(self.service.reconcile(Recovered()))
+        entry = self.store.history()[0]
+        self.assertEqual(entry["status"], "succeeded")
+        self.assertIn("Confirmed afterwards; 1 latest episodes used previously; 90 minutes; 1 music tracks",
+                      entry["detail"])
+        self.assertTrue(entry["detail"].endswith(
+            "\nItems:\nArtist - Song\n[Episode] spotify:episode:1"))
 
     def test_failed_preparation_does_not_replace(self):
         class Fake:

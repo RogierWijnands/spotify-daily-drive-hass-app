@@ -45,6 +45,27 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"HTTP 429", response.data)
         self.assertIn(b"Retry-After: &#39;45&#39;", response.data)
 
+    def test_history_expands_tracks_and_keeps_old_details_readable(self):
+        store = self.isolated_store()
+        store.finish(store.start(), "failed", "Old error message")
+        history_id = store.start()
+        store.prepare(history_id, "target", [], ["track1", "track2"], [],
+                      "90 minutes; 2 music tracks\nTracks:\nArtist - Song\nOther & Artist - <Song>")
+        store.resolve(True)
+        history_id = store.start()
+        store.prepare(history_id, "target", [], ["track1", "episode"], ["episode"],
+                      "90 minutes; 1 music tracks\nItems:\nArtist - Song\n[Episode] News & <Update>")
+        store.resolve(True)
+
+        response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b"90 minutes; 2 music tracks", response.data)
+        self.assertIn(b"<details><summary>Show playlist items</summary>", response.data)
+        self.assertIn(b"<li>Artist - Song</li>", response.data)
+        self.assertIn(b"<li>Other &amp; Artist - &lt;Song&gt;</li>", response.data)
+        self.assertIn(b"<li>[Episode] News &amp; &lt;Update&gt;</li>", response.data)
+        self.assertIn(b"Old error message", response.data)
+        self.assertEqual(response.data.count(b"<details>"), 2)
+
     def test_configuration_accepts_urls_and_rejects_target_as_source(self):
         pid = "0123456789ABCDEFGHIJKL"
         data = {

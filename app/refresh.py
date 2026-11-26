@@ -20,7 +20,7 @@ class Refresh:
         # Compare with both snapshots before deciding whether a lost write succeeded.
         actual = api.playlist_items(pending["playlist_id"])
         if actual == pending["after_items"]:
-            self.store.resolve(True, pending["detail"] + " (confirmed afterwards)")
+            self.store.resolve(True, "Confirmed afterwards; " + pending["detail"])
             return True
         elif actual == pending["before_items"]:
             self.store.resolve(False, "Spotify change was not applied")
@@ -63,7 +63,7 @@ class Refresh:
             previously_used = self.store.used_episodes()
             repeated = sum(uri in previously_used for uri in episodes)
             if repeated:
-                detail += f"; {repeated} latest episodes used previously"
+                detail = f"{repeated} latest episodes used previously; {detail}"
 
             # Persist the snapshots before sending the single replacement request.
             self.store.prepare(history_id, pid, before, after, episodes, detail)

@@ -75,7 +75,10 @@ An error page may appear after authorization; copy the full URL from the address
 <h2>Refresh</h2><p>Automatically at {{ refresh_times | join(', ') }} (Europe/Amsterdam).</p>
 <form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh now</button></form>
 <h2>History</h2><table><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr>
-{% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}</td><td>{{ entry.detail }}</td></tr>{% endfor %}
+{% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}</td><td>{{ entry.summary }}
+{% if entry.items_list %}<details><summary>Show playlist items</summary><ol>
+{% for item in entry.items_list %}<li>{{ item }}</li>{% endfor %}
+</ol></details>{% endif %}</td></tr>{% endfor %}
 </table>
 <h2>Storage</h2>
 <p>SQLite database: {{ storage_bytes }} bytes ({{ "%.2f" | format(storage_bytes / 1048576) }} MiB).
@@ -110,6 +113,14 @@ def home(message=None, status=200):
     with oauth_lock:
         auth_url = oauth.get("url")
 
+    history = store.history()
+    for entry in history:
+        summary, separator, items = entry["detail"].partition("\nItems:\n")
+        if not separator:
+            summary, separator, items = entry["detail"].partition("\nTracks:\n")
+        entry["summary"] = summary
+        entry["items_list"] = items.splitlines() if separator else []
+
     return render_template_string(
         PAGE,
         csrf=csrf,
@@ -123,7 +134,7 @@ def home(message=None, status=200):
         podcast_shows=format_show_lines(store.get("podcast_shows", [])),
         connected=bool(store.get("refresh_token")),
         pending=store.pending(),
-        history=store.history(),
+        history=history,
         refresh_times=REFRESH_TIMES,
         storage_bytes=os.path.getsize(store.path),
     ), status
