@@ -100,12 +100,18 @@ class Store:
             row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         return json.loads(row["value"]) if row else default
 
-    def set_many(self, values, *, clear_cache=False):
+    def set_many(self, values, *, clear_cache=False, clear_daily_cache=False,
+                 clear_request_stats=False):
         # Credential changes and cache invalidation share one transaction.
         with self.connect() as db:
-            if clear_cache:
+            if clear_cache or clear_daily_cache:
                 db.execute("DELETE FROM daily_cache")
+            if clear_cache:
                 db.execute("DELETE FROM settings WHERE key=?", (FOLLOWED_ARTISTS_CACHE_KEY,))
+            if clear_request_stats:
+                # Counts from different day boundaries cannot be combined reliably.
+                db.execute("DELETE FROM daily_request_categories")
+                db.execute("DELETE FROM daily_requests")
             db.executemany(
                 "INSERT OR REPLACE INTO settings VALUES (?, ?)",
                 [(k, json.dumps(v)) for k, v in values.items()],

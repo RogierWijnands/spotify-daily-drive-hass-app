@@ -6,15 +6,14 @@ import threading
 import time
 from datetime import datetime
 from http import HTTPStatus
-from zoneinfo import ZoneInfo
 
 from flask import Flask, abort, render_template_string, request
 from requests import RequestException
 from waitress import serve
 
 from .constants import (
-    AMSTERDAM_TIMEZONE, ARTIST_RELEASE_ERROR_PREFIXES, ARTIST_RELEASE_SOURCE,
-    BYTES_PER_MEBIBYTE, EMPTY_ARTIST_POOL_ERROR, EMPTY_GROUP_ERROR,
+    ARTIST_RELEASE_ERROR_PREFIXES, ARTIST_RELEASE_SOURCE, BYTES_PER_MEBIBYTE,
+    DEFAULT_SPOTIFY_MARKET, DEFAULT_TIMEZONE, EMPTY_ARTIST_POOL_ERROR, EMPTY_GROUP_ERROR,
     EMPTY_GROUP_HISTORY_MARKER, HISTORY_ERROR_MARKERS,
     HISTORY_LIKED_TRACKS_LABEL, HISTORY_RECENT_TRACKS_LABEL, HISTORY_TOP_ARTISTS_PREFIX,
     HISTORY_TOP_TRACKS_PREFIX, HOME_ASSISTANT_INGRESS_IP, ITEMS_DETAIL_SEPARATOR,
@@ -34,8 +33,10 @@ from .refresh import Refresh
 from .shows import format_show_lines, parse_show_lines, validate_shows
 from .spotify import (
     REDIRECT_URI, SpotifyError, authorization, callback_code, playlist_id, token_request,
+    validate_market,
 )
 from .store import Store
+from .timezones import current_time, validate_timezone
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -175,6 +176,12 @@ I have checked the playlist and understand that the previous outcome remains unk
 <h2>Settings</h2>
 <form action="configure" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label>Spotify client ID <input name="client_id" required value="{{ client_id }}"></label>
+<label>Spotify market (two-letter country code)
+<input name="market" required maxlength="2" value="{{ market }}"></label>
+<label>Timezone (<code>system</code> or an IANA timezone, e.g. <code>Europe/Amsterdam</code>)
+<input name="timezone" required value="{{ timezone }}"></label>
+<p>Changing the market or timezone clears daily caches. Changing the timezone also clears
+request statistics because the boundaries of each day change.</p>
 <label>Daily Drive playlist URL <input name="target" required value="{{ target }}"></label>
 <label>Source playlists you own (one Spotify URL per line)
 <textarea name="sources" rows="4">{{ sources }}</textarea></label>
@@ -194,7 +201,7 @@ An error page may appear after authorization; copy the full URL from the address
 <form action="callback" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
 <label>Callback URL <input name="callback" required autocomplete="off"></label><button>Complete connection</button></form>
 {% endif %}
-<h2>Refresh</h2><p>Automatically at {{ refresh_times | join(', ') }} ({{ timezone }}).</p>
+<h2>Refresh</h2><p>Automatically at {{ refresh_times | join(', ') }} ({{ timezone_display }}).</p>
 <form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh now</button></form>
 <h2>History</h2><table><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr>
 {% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}</td><td>{{ entry.summary }}
@@ -214,7 +221,7 @@ An error page may appear after authorization; copy the full URL from the address
 </ol></details>{% endif %}</td></tr>{% endfor %}
 </table>
 <h2>Spotify requests today</h2>
-<p>{{ request_day }} ({{ timezone }}): {{ request_overview.requests }} request{{ "s" if request_overview.requests != 1 else "" }},
+<p>{{ request_day }} ({{ timezone_display }}): {{ request_overview.requests }} request{{ "s" if request_overview.requests != 1 else "" }},
 {{ request_overview.errors }} error{{ "s" if request_overview.errors != 1 else "" }}. Includes Spotify API and token requests.
 Counts start when a request is started; errors include unsuccessful responses and network failures.
 Reload this page to update the overview.</p>
@@ -275,12 +282,15 @@ def home(message=None, status=HTTPStatus.OK):
                               if selection_separator else [])
         entry["items_list"] = items.splitlines() if separator else []
 
-    request_day = datetime.now(ZoneInfo(AMSTERDAM_TIMEZONE)).date().isoformat()
+    now = current_time(store, datetime)
+    timezone = store.get("timezone", DEFAULT_TIMEZONE)
+    timezone_display = f"{timezone} ({now.strftime('%Z %z').strip()})"
+    request_day = now.date().isoformat()
     request_overview = store.request_overview(request_day)
     if request_overview["first_quota"]:
         request_overview["first_quota"]["time"] = datetime.fromisoformat(
             request_overview["first_quota"]["started"]
-        ).astimezone(ZoneInfo(AMSTERDAM_TIMEZONE)).strftime("%H:%M:%S %Z")
+        ).strftime("%H:%M:%S %z")
     storage_bytes = os.path.getsize(store.path)
     return render_template_string(
         PAGE,
@@ -289,6 +299,7 @@ def home(message=None, status=HTTPStatus.OK):
         auth_url=auth_url,
         redirect_uri=REDIRECT_URI,
         client_id=store.get("client_id", ""),
+        market=store.get("market", DEFAULT_SPOTIFY_MARKET),
         target=store.get("playlist_id", ""),
         sources="\n".join(store.get("source_ids", [])),
         news_shows=format_show_lines(store.get("news_shows", [])),
@@ -299,7 +310,8 @@ def home(message=None, status=HTTPStatus.OK):
         request_day=request_day,
         request_overview=request_overview,
         refresh_times=REFRESH_TIMES,
-        timezone=AMSTERDAM_TIMEZONE,
+        timezone=timezone,
+        timezone_display=timezone_display,
         storage_bytes=storage_bytes,
         storage_mib=storage_bytes / BYTES_PER_MEBIBYTE,
     ), status
@@ -319,6 +331,8 @@ def configure():
             raise ValueError("Invalid Spotify client ID")
 
         target = playlist_id(request.form.get("target", ""))
+        market = validate_market(request.form.get("market", store.get("market", DEFAULT_SPOTIFY_MARKET)))
+        timezone = validate_timezone(request.form.get("timezone", store.get("timezone", DEFAULT_TIMEZONE)))
         sources = list(dict.fromkeys(
             playlist_id(line)
             for line in request.form.get("sources", "").splitlines()
@@ -338,14 +352,24 @@ def configure():
         try:
             values = {
                 "client_id": client_id, "playlist_id": target, "source_ids": sources,
-                "news_shows": news, "podcast_shows": podcasts,
+                "news_shows": news, "podcast_shows": podcasts, "market": market, "timezone": timezone,
             }
             client_changed = client_id != store.get("client_id")
+            market_changed = market != store.get("market", DEFAULT_SPOTIFY_MARKET)
+            timezone_changed = timezone != store.get("timezone", DEFAULT_TIMEZONE)
+            if market_changed and store.pending():
+                raise ValueError(
+                    "An uncertain playlist change is still pending; keep the original market first"
+                )
             if client_changed:
                 values["refresh_token"] = None
                 with oauth_lock:
                     oauth.clear()
-            store.set_many(values, clear_cache=client_changed)
+            store.set_many(
+                values, clear_cache=client_changed,
+                clear_daily_cache=market_changed or timezone_changed,
+                clear_request_stats=timezone_changed,
+            )
         finally:
             refresh.lock.release()
 
@@ -483,11 +507,14 @@ def clear_storage():
 
 
 def scheduler():
-    tz = ZoneInfo(AMSTERDAM_TIMEZONE)
-
     # Check local time regularly; the stored key prevents duplicate scheduled runs.
     while True:
-        now = datetime.now(tz)
+        try:
+            now = current_time(store, datetime)
+        except (sqlite3.Error, ValueError):
+            log.exception("Could not read the scheduler timezone")
+            time.sleep(SCHEDULER_POLL_INTERVAL_SECONDS)
+            continue
         clock = now.strftime("%H:%M")
         if clock in REFRESH_TIMES:
             run_refresh(now.strftime("%Y-%m-%d") + " " + clock)

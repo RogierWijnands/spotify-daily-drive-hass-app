@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -97,6 +98,58 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("client_id", output.getvalue())
         self.assertFalse(Path(self.db).exists())
+
+    def test_market_and_timezone_settings_validate_and_clear_the_right_caches(self):
+        config = {"client_id": self.client_id, "playlist": self.target}
+        store = Store(self.db)
+        store.set_many({"client_id": self.client_id, "refresh_token": "saved",
+                        "followed_artists_cache": {"artists": {"old": {}}}})
+        store.set_cached("liked_tracks_cache", "2026-01-01", ["old"])
+        store.start_request("Liked tracks", datetime(2026, 1, 1, tzinfo=timezone.utc), "Read")
+
+        config["market"] = " us "
+        self.path.write_text(json.dumps(config), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["--config", str(self.path), "--pending"]), 0)
+        store = Store(self.db)
+        self.assertEqual((store.get("market"), store.get("timezone")), ("US", "system"))
+        self.assertIsNone(store.get_cached("liked_tracks_cache", "2026-01-01"))
+        self.assertEqual(store.request_overview("2026-01-01")["requests"], 1)
+        self.assertEqual(store.get("refresh_token"), "saved")
+        self.assertIsNotNone(store.get("followed_artists_cache"))
+
+        store.set_cached("liked_tracks_cache", "2026-01-01", ["new"])
+        config["timezone"] = "Asia/Tokyo"
+        self.path.write_text(json.dumps(config), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(["--config", str(self.path), "--pending"]), 0)
+        store = Store(self.db)
+        self.assertEqual(store.get("timezone"), "Asia/Tokyo")
+        self.assertIsNone(store.get_cached("liked_tracks_cache", "2026-01-01"))
+        self.assertEqual(store.request_overview("2026-01-01")["requests"], 0)
+        self.assertIsNotNone(store.get("followed_artists_cache"))
+
+        for field, invalid in (("market", "USA"), ("market", "ſſ"), ("market", None),
+                               ("timezone", "Not/AZone"), ("timezone", "")):
+            with self.subTest(field=field, invalid=invalid):
+                bad = dict(config, **{field: invalid})
+                self.path.write_text(json.dumps(bad), encoding="utf-8")
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(cli.main(["--config", str(self.path), "--pending"]), 1)
+                self.assertEqual((Store(self.db).get("market"), Store(self.db).get("timezone")),
+                                 ("US", "Asia/Tokyo"))
+
+    def test_market_change_is_blocked_while_playlist_write_is_uncertain(self):
+        store = Store(self.db)
+        store.set_many({"client_id": self.client_id, "market": "NL"})
+        history = store.start()
+        store.prepare(history, self.target, ["old"], ["new"], [], "detail")
+        self.path.write_text(json.dumps({"client_id": self.client_id, "playlist": self.target,
+                                         "market": "US"}), encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(cli.main(["--config", str(self.path), "--pending"]), 1)
+        self.assertIn("original market", output.getvalue())
+        self.assertEqual(Store(self.db).get("market"), "NL")
 
     def test_show_configuration_is_saved_and_validated(self):
         show = "1" * 22

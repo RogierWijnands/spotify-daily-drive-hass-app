@@ -7,13 +7,12 @@ from contextlib import contextmanager
 from datetime import datetime
 from http import HTTPStatus
 from urllib.parse import parse_qs, urlencode, urlparse
-from zoneinfo import ZoneInfo
 
 import requests
 
 from .constants import (
-    AMSTERDAM_TIMEZONE, API_REQUEST_TIMEOUT_SECONDS, ARTIST_DISCOVERY_RELEASE_GROUPS,
-    CACHE_KEY_SUFFIX, COLLABORATOR_RELEASE_GROUPS, FOLLOWED_ARTISTS_CACHE_KEY,
+    API_REQUEST_TIMEOUT_SECONDS, ARTIST_DISCOVERY_RELEASE_GROUPS,
+    CACHE_KEY_SUFFIX, COLLABORATOR_RELEASE_GROUPS, DEFAULT_SPOTIFY_MARKET, FOLLOWED_ARTISTS_CACHE_KEY,
     MAX_FOLLOWED_ARTISTS_REQUESTS_PER_DAY,
     MAX_LIKED_TRACK_PAGES_PER_REFRESH, MAX_PAGINATED_ITEMS, PKCE_VERIFIER_ENTROPY_BYTES,
     REQUEST_CATEGORY_ARTIST_RELEASES, REQUEST_CATEGORY_FOLLOWED_ARTISTS,
@@ -22,10 +21,11 @@ from .constants import (
     REQUEST_CATEGORY_RELEASE_TRACKS, REQUEST_CATEGORY_SHOW_EPISODES, REQUEST_CATEGORY_TOKEN,
     REQUEST_CATEGORY_TOP_ARTISTS, REQUEST_CATEGORY_TOP_TRACKS, SECURE_TOKEN_ENTROPY_BYTES,
     SOURCE_FOLLOWED_ARTISTS, SPOTIFY_FOLLOWED_ARTISTS_PATH, SPOTIFY_ID_LENGTH,
-    SPOTIFY_LIKED_TRACKS_PATH, SPOTIFY_MARKET, SPOTIFY_PAGE_SIZE,
+    SPOTIFY_LIKED_TRACKS_PATH, SPOTIFY_MARKET_CODE_LENGTH, SPOTIFY_PAGE_SIZE,
     SPOTIFY_PLAYLIST_ITEMS_PATH, SPOTIFY_QUOTA_EXCEEDED_REASON, SPOTIFY_RECENT_TRACKS_PATH,
     SPOTIFY_TOP_ITEMS_PATH, TOKEN_REQUEST_TIMEOUT_SECONDS, TOP_TIME_RANGE_LABELS, ZERO_FETCH_RESULTS,
 )
+from .timezones import current_time
 
 REDIRECT_URI = "http://127.0.0.1:8888/callback"
 SCOPES = " ".join(
@@ -143,8 +143,8 @@ def _is_quota_response(response):
 
 @contextmanager
 def _tracked_request(store, category, detail):
-    started = datetime.now(ZoneInfo(AMSTERDAM_TIMEZONE))
     try:
+        started = current_time(store, datetime)
         request_info = store.start_request(category, started, detail)
     except sqlite3.Error:
         # A statistics failure must not stop or repeat a Spotify playlist write.
@@ -207,6 +207,15 @@ def _spotify_id(value, kind):
     if len(value) != SPOTIFY_ID_LENGTH or not value.isascii() or not value.isalnum():
         raise ValueError(f"Invalid Spotify {kind} URL or ID")
     return value
+
+
+def validate_market(value):
+    if not isinstance(value, str):
+        raise ValueError("Spotify market must be a two-letter country code")
+    value = value.strip()
+    if len(value) != SPOTIFY_MARKET_CODE_LENGTH or not value.isascii() or not value.isalpha():
+        raise ValueError("Spotify market must be a two-letter country code")
+    return value.upper()
 
 
 def playlist_id(value):
@@ -279,8 +288,11 @@ def token_request(data, store):
 
 
 class Spotify:
+    market = DEFAULT_SPOTIFY_MARKET
+
     def __init__(self, store):
         self.store = store
+        self.market = validate_market(store.get("market", DEFAULT_SPOTIFY_MARKET))
         client_id = store.get("client_id")
         refresh = store.get("refresh_token")
         if not client_id or not refresh:
@@ -333,15 +345,15 @@ class Spotify:
         return self.request("GET", path, params=params)
 
     def cached_today(self, key):
-        day = datetime.now(ZoneInfo(AMSTERDAM_TIMEZONE)).date().isoformat()
+        day = current_time(self.store, datetime).date().isoformat()
         return self.store.get_cached(key, day)
 
     def cache_today(self, key, value):
-        day = datetime.now(ZoneInfo(AMSTERDAM_TIMEZONE)).date().isoformat()
+        day = current_time(self.store, datetime).date().isoformat()
         self.store.set_cached(key, day, value)
 
     def daily_cached(self, key, fetch, trace=None):
-        day = datetime.now(ZoneInfo(AMSTERDAM_TIMEZONE)).date().isoformat()
+        day = current_time(self.store, datetime).date().isoformat()
         cached = self.store.get_cached(key, day)
         label = key.removesuffix(CACHE_KEY_SUFFIX).replace("_", " ").capitalize()
 
@@ -390,7 +402,7 @@ class Spotify:
         # Fetch the first page with the total so it can also be used if randomly chosen.
         first = self.get(
             SPOTIFY_LIKED_TRACKS_PATH,
-            market=SPOTIFY_MARKET,
+            market=self.market,
             limit=SPOTIFY_PAGE_SIZE,
             offset=0,
         )
@@ -414,7 +426,7 @@ class Spotify:
             for page in pages:
                 response = first if page == 0 else self.get(
                     SPOTIFY_LIKED_TRACKS_PATH,
-                    market=SPOTIFY_MARKET,
+                    market=self.market,
                     limit=SPOTIFY_PAGE_SIZE,
                     offset=page * SPOTIFY_PAGE_SIZE,
                 )
@@ -460,7 +472,7 @@ class Spotify:
             raise
 
     def followed_artists(self, trace=None):
-        day = datetime.now(ZoneInfo(AMSTERDAM_TIMEZONE)).date().isoformat()
+        day = current_time(self.store, datetime).date().isoformat()
         key = FOLLOWED_ARTISTS_CACHE_KEY
 
         # Keep the collected artists and scan position between refreshes and restarts.
@@ -593,7 +605,7 @@ class Spotify:
     def playlist_items(self, pid):
         entries = self.pages(
             SPOTIFY_PLAYLIST_ITEMS_PATH.format(playlist_id=pid),
-            {"additional_types": "track,episode", "market": SPOTIFY_MARKET},
+            {"additional_types": "track,episode", "market": self.market},
         )
         result = []
 

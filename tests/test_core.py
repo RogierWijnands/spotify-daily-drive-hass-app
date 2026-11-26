@@ -2,6 +2,7 @@ import os
 import random
 import sqlite3
 import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from app.spotify import (
     show_id, token_request,
 )
 from app.store import Store
+from app.timezones import current_time
 
 NEWS = "news"
 PODCASTS = ["podcast1", "podcast2"]
@@ -32,6 +34,8 @@ def track(number, minutes=4):
 
 
 class UncachedSpotify:
+    market = "NL"
+
     # Selection fakes bypass SQLite; cache behavior is tested with the real Store.
     def daily_cached(self, key, fetch, trace=None):
         return fetch()
@@ -211,6 +215,7 @@ class SelectionTests(unittest.TestCase):
                     return {"items": [episode(show, number + i) for i in range(count)], "next": None}
 
             api = Fake()
+            api.store.set_many({"timezone": "Europe/Amsterdam"})
             news = [{"show": "news", "count": 2}]
             podcasts = [{"show": "podcast", "count": 1}]
             with patch("app.spotify.datetime") as clock:
@@ -964,7 +969,7 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(api.calls.count("/me/following"), 1)
             self.assertEqual(api.calls.count("/artists/followed/albums"), 2)
 
-            api.store.set_cached("liked_tracks_cache", datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat(),
+            api.store.set_cached("liked_tracks_cache", datetime.now().astimezone().date().isoformat(),
                                  [{"track": {"id": "old", "type": "track", "uri": "spotify:track:old",
                                              "is_playable": True, "duration_ms": 180000}}])
             groups = music_candidates(api, [], random.Random(3))
@@ -1122,7 +1127,7 @@ class SelectionTests(unittest.TestCase):
                     return "short_term"
 
             api = Fake()
-            day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+            day = datetime.now().astimezone().date().isoformat()
             issues, trace = [], []
             with self.assertLogs("app.selection", level="WARNING"):
                 music_candidates(api, [], FixedRange(1), issues, trace)
@@ -1256,6 +1261,75 @@ class SpotifyTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.store = Store(os.path.join(directory.name, "requests.sqlite"))
 
+    def test_configured_market_reaches_all_market_sensitive_requests(self):
+        self.store.set_many({"client_id": "client", "refresh_token": "token", "market": "US"})
+        with patch("app.spotify.token_request", return_value={"access_token": "access"}):
+            api = Spotify(self.store)
+
+        calls = []
+
+        def get(path, **params):
+            calls.append((path, params))
+            if path == "/me/top/artists":
+                return {"items": [{"id": "artist"}]}
+            if path == "/artists/artist/albums":
+                return {"items": [{"id": "album"}], "total": 1}
+            if path == "/me/tracks":
+                return {"items": [], "total": 0}
+            return {"items": [], "next": None}
+
+        api.get = get
+        api.followed_artists = Mock(return_value=[])
+        api.playlist_items("target")
+        podcast_candidates(api, [{"show": "show", "count": 1}], [])
+        music_candidates(api, ["source"], random.Random(1))
+
+        relevant = {
+            "/playlists/target/items", "/playlists/source/items", "/shows/show/episodes",
+            "/me/tracks", "/artists/artist/albums", "/albums/album/tracks",
+        }
+        market_calls = [(path, params) for path, params in calls if path in relevant]
+        self.assertEqual({path for path, _ in market_calls}, relevant)
+        self.assertTrue(all(params["market"] == "US" for _, params in market_calls))
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "Changing the system timezone requires tzset")
+    def test_system_timezone_and_configured_override_use_correct_local_day(self):
+        clock = Mock()
+        clock.now.return_value = datetime(2026, 7, 15, 23, 30, tzinfo=timezone.utc)
+
+        try:
+            with patch.dict(os.environ, {"TZ": "America/Los_Angeles"}):
+                time.tzset()
+                system_time = current_time(self.store, clock)
+                self.assertEqual(system_time.isoformat(), "2026-07-15T16:30:00-07:00")
+                self.store.set_many({"timezone": "Asia/Tokyo"})
+                configured_time = current_time(self.store, clock)
+                self.assertEqual(configured_time.isoformat(), "2026-07-16T08:30:00+09:00")
+        finally:
+            time.tzset()
+
+    def test_request_counts_and_cache_follow_configured_midnight(self):
+        self.store.set_many({"timezone": "America/Los_Angeles"})
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.token = "secret"
+        before = datetime(2026, 7, 16, 6, 59, tzinfo=timezone.utc)
+        after = datetime(2026, 7, 16, 7, 0, tzinfo=timezone.utc)
+        response = Mock(ok=True, content=b"", json=Mock(return_value={}))
+        fetch = Mock(return_value=[])
+
+        with patch("app.spotify.datetime") as clock, \
+             patch("app.spotify.requests.request", return_value=response):
+            clock.now.side_effect = [before, after, before, after]
+            api.daily_cached("liked_tracks_cache", fetch)
+            api.daily_cached("liked_tracks_cache", fetch)
+            api.get("/me/tracks")
+            api.get("/me/tracks")
+
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(self.store.request_overview("2026-07-15")["requests"], 1)
+        self.assertEqual(self.store.request_overview("2026-07-16")["requests"], 1)
+
     def test_request_overview_groups_actual_requests_by_component(self):
         api = Spotify.__new__(Spotify)
         api.store = self.store
@@ -1280,7 +1354,7 @@ class SpotifyTests(unittest.TestCase):
         with patch("app.spotify.requests.post", return_value=response):
             token_request({"grant_type": "refresh_token", "refresh_token": "private-token"}, self.store)
 
-        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        day = datetime.now().astimezone().date().isoformat()
         overview = self.store.request_overview(day)
         categories = {entry["category"]: entry for entry in overview["categories"]}
         self.assertEqual(overview["requests"], len(requests) + 1)
@@ -1292,6 +1366,7 @@ class SpotifyTests(unittest.TestCase):
         self.assertNotIn("private-token", repr(overview))
 
     def test_request_errors_quota_and_amsterdam_midnight_are_recorded(self):
+        self.store.set_many({"timezone": "Europe/Amsterdam"})
         api = Spotify.__new__(Spotify)
         api.store = self.store
         api.token = "secret"
@@ -1343,7 +1418,7 @@ class SpotifyTests(unittest.TestCase):
             with self.assertRaises(SpotifyError):
                 api.get("/me/tracks")
 
-        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        day = datetime.now().astimezone().date().isoformat()
         self.assertEqual(self.store.request_overview(day)["first_quota"]["number"], 1)
 
         other_day = datetime(2026, 1, 1, 12, tzinfo=ZoneInfo("Europe/Amsterdam"))
@@ -1364,7 +1439,7 @@ class SpotifyTests(unittest.TestCase):
             with self.assertRaises(SpotifyRateLimitError):
                 token_request({"grant_type": "refresh_token", "refresh_token": "private-token"}, self.store)
 
-        day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+        day = datetime.now().astimezone().date().isoformat()
         overview = self.store.request_overview(day)
         self.assertEqual((overview["requests"], overview["errors"]), (1, 1))
         self.assertEqual(overview["first_quota"]["category"], "Token requests")
@@ -1384,6 +1459,7 @@ class SpotifyTests(unittest.TestCase):
     def test_statistics_failure_does_not_replace_spotify_request_outcome(self):
         api = Spotify.__new__(Spotify)
         api.store = Mock()
+        api.store.get.return_value = "system"
         api.token = "secret"
         ok = Mock(ok=True, content=b"", json=Mock(return_value={}))
         api.store.start_request.side_effect = sqlite3.OperationalError("database unavailable")
@@ -1520,7 +1596,7 @@ class SpotifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             api = Spotify.__new__(Spotify)
             api.store = Store(os.path.join(directory, "cache.sqlite"))
-            day = datetime.now(ZoneInfo("Europe/Amsterdam")).date().isoformat()
+            day = datetime.now().astimezone().date().isoformat()
             partial = [{"track": {"id": "first"}}]
             trace = []
             cases = (
@@ -1557,6 +1633,7 @@ class SpotifyTests(unittest.TestCase):
             path = os.path.join(directory, "cache.sqlite")
             api = Spotify.__new__(Spotify)
             api.store = Store(path)
+            api.store.set_many({"timezone": "Europe/Amsterdam"})
             requests_seen = []
 
             def get(endpoint, **params):
@@ -1584,6 +1661,7 @@ class SpotifyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             api = Spotify.__new__(Spotify)
             api.store = Store(os.path.join(directory, "cache.sqlite"))
+            api.store.set_many({"timezone": "Europe/Amsterdam"})
             fetch = Mock(return_value=[])
             trace = []
             with patch("app.spotify.datetime") as clock:

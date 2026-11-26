@@ -1,4 +1,6 @@
 {
+  "market": "NL",
+  "timezone": "system",
   "client_id": "YOUR_SPOTIFY_CLIENT_ID",
   "playlist": "https://open.spotify.com/playlist/YOUR_PLAYLIST_ID",
   "source_playlists": [

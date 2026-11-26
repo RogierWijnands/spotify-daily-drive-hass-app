@@ -20,7 +20,7 @@ from .constants import (
     SOURCE_MEDIUM_TERM_TOP_TRACKS, SOURCE_PARTIAL_PREFIX, SOURCE_PLAYLISTS,
     SOURCE_RECENT_TRACKS,
     SOURCE_SHORT_TERM_TOP_TRACKS, SOURCE_SKIP_PREFIX, SOURCE_TOP_ARTISTS, SOURCE_WARNING_PREFIX,
-    SPOTIFY_ALBUM_TRACKS_PATH, SPOTIFY_ARTIST_ALBUMS_PATH, SPOTIFY_MARKET, SPOTIFY_PAGE_SIZE,
+    SPOTIFY_ALBUM_TRACKS_PATH, SPOTIFY_ARTIST_ALBUMS_PATH, SPOTIFY_PAGE_SIZE,
     SPOTIFY_PLAYLIST_ITEMS_PATH, SPOTIFY_RECENT_TRACKS_PATH, SPOTIFY_SHOW_EPISODES_PATH,
     SPOTIFY_TOP_ITEMS_PATH, TARGET_DURATION_MINUTES,
     TOP_ARTISTS_TIME_RANGE_CACHE_KEY, TOP_ITEMS_CACHE_KEY_PREFIX, TOP_TIME_RANGE_LABELS,
@@ -106,7 +106,7 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
                 try:
                     page = api.get(
                         SPOTIFY_SHOW_EPISODES_PATH.format(show_id=show),
-                        market=SPOTIFY_MARKET,
+                        market=api.market,
                         limit=SPOTIFY_PAGE_SIZE,
                         offset=offset,
                     )
@@ -222,7 +222,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                 raise SpotifyError("Spotify returned an invalid item list")
             return result
 
-        # Cache only successful, valid responses for the current Amsterdam day.
+        # Cache only successful, valid responses for the current local day.
         return api.daily_cached(key, fetch, trace=trace if trace_target is None else trace_target)
 
     def cached_top_items(kind, time_range, trace_target=None):
@@ -307,7 +307,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
             f"{SOURCE_PLAYLISTS} {pid}",
             lambda: api.pages(
                 SPOTIFY_PLAYLIST_ITEMS_PATH.format(playlist_id=pid),
-                {"additional_types": TRACK_TYPE, "market": SPOTIFY_MARKET},
+                {"additional_types": TRACK_TYPE, "market": api.market},
             ),
             issues,
         )
@@ -389,7 +389,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
         # Find music from one artist. include_groups determines which kinds of
         # releases to search, such as albums, singles, or appearances.
         path = SPOTIFY_ARTIST_ALBUMS_PATH.format(artist_id=artist_id)
-        params = {"market": SPOTIFY_MARKET, "include_groups": include_groups}
+        params = {"market": api.market, "include_groups": include_groups}
 
         # Spotify returns at most ARTIST_RELEASE_PAGE_SIZE releases per request. This first request
         # also tells us how many releases are available in total.
@@ -474,7 +474,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                 else:
                     release = api.get(
                         SPOTIFY_ALBUM_TRACKS_PATH.format(album_id=album_id),
-                        market=SPOTIFY_MARKET,
+                        market=api.market,
                         limit=SPOTIFY_PAGE_SIZE,
                     )
                     if (

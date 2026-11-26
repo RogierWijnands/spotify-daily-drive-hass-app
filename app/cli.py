@@ -9,7 +9,7 @@ from pathlib import Path
 from requests import RequestException
 
 from .constants import (
-    DAILY_DRIVE_SOURCE_PLAYLIST_ERROR, MAX_PLAYLIST_ITEMS_ERROR,
+    DAILY_DRIVE_SOURCE_PLAYLIST_ERROR, DEFAULT_SPOTIFY_MARKET, DEFAULT_TIMEZONE, MAX_PLAYLIST_ITEMS_ERROR,
     MAX_SPOTIFY_PLAYLIST_ITEMS, MILLISECONDS_PER_SECOND, MISSING_SPOTIFY_REFRESH_TOKEN_ERROR,
     NO_UNCERTAIN_CHANGE_ERROR, PREVIOUS_CHANGE_OUTCOME_UNKNOWN_MESSAGE, SECONDS_PER_MINUTE,
     SPOTIFY_CLIENT_ID_LENGTH,
@@ -19,8 +19,10 @@ from .selection import build_items
 from .shows import validate_shows
 from .spotify import (
     REDIRECT_URI, Spotify, SpotifyError, authorization, callback_code, playlist_id, token_request,
+    validate_market,
 )
 from .store import Store
+from .timezones import validate_timezone
 
 
 def read_config(path):
@@ -54,7 +56,9 @@ def read_config(path):
     if target_id in source_ids:
         raise ValueError(DAILY_DRIVE_SOURCE_PLAYLIST_ERROR)
     news, podcasts = validate_shows(config.get("news_shows", []), config.get("podcast_shows", []))
-    return client_id, target_id, source_ids, news, podcasts
+    market = validate_market(config.get("market", DEFAULT_SPOTIFY_MARKET))
+    timezone = validate_timezone(config.get("timezone", DEFAULT_TIMEZONE))
+    return client_id, target_id, source_ids, news, podcasts, market, timezone
 
 
 def connect_spotify(store, client_id):
@@ -124,24 +128,34 @@ def main(argv=None):
 
     try:
         config_path = args.config.expanduser().resolve()
-        client_id, target, sources, news, podcasts = read_config(config_path)
+        client_id, target, sources, news, podcasts, market, timezone = read_config(config_path)
         store = Store(str(config_path.parent / ".daily-drive.sqlite3"))
 
-        # A pending playlist write must be reconciled with the original account.
-        if client_id != store.get("client_id") and store.pending():
-            raise SpotifyError(
-                "An uncertain playlist change is still pending; use the original client ID first"
-            )
+        # A pending write must be checked using its original account and market.
+        client_changed = client_id != store.get("client_id")
+        market_changed = market != store.get("market", DEFAULT_SPOTIFY_MARKET)
+        timezone_changed = timezone != store.get("timezone", DEFAULT_TIMEZONE)
+        if store.pending():
+            if client_changed:
+                raise SpotifyError(
+                    "An uncertain playlist change is still pending; use the original client ID first"
+                )
+            if market_changed:
+                raise SpotifyError(
+                    "An uncertain playlist change is still pending; use the original market first"
+                )
 
         # A new client ID requires a fresh Spotify connection and library cache.
         values = {
             "client_id": client_id, "playlist_id": target, "source_ids": sources,
-            "news_shows": news, "podcast_shows": podcasts,
+            "news_shows": news, "podcast_shows": podcasts, "market": market, "timezone": timezone,
         }
-        client_changed = client_id != store.get("client_id")
         if client_changed:
             values["refresh_token"] = None
-        store.set_many(values, clear_cache=client_changed)
+        store.set_many(
+            values, clear_cache=client_changed, clear_daily_cache=market_changed or timezone_changed,
+            clear_request_stats=timezone_changed,
+        )
 
         # Preview is the default; only --apply writes to Spotify.
         if args.authorize:

@@ -39,7 +39,7 @@ class WebTests(unittest.TestCase):
 
     def test_request_overview_shows_daily_counts_and_first_quota_between_sections(self):
         store = self.isolated_store()
-        started = datetime.now(ZoneInfo("Europe/Amsterdam"))
+        started = datetime.now().astimezone()
         store.start_request("Liked tracks", started, "GET")
         quota = store.start_request("Artist releases", started, "Read; artist ID artist123; offset 50")
         store.fail_request(quota, quota=True)
@@ -162,6 +162,54 @@ class WebTests(unittest.TestCase):
         data["sources"] = data["target"]
         response = self.client.post("/configure", data=data, environ_overrides=self.remote)
         self.assertEqual(response.status_code, 400)
+
+    def test_market_and_timezone_settings_are_saved_and_validated(self):
+        store = self.isolated_store()
+        store.set_many({"client_id": "a" * 32, "refresh_token": "saved",
+                        "followed_artists_cache": {"artists": {"old": {}}}})
+        response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b'name="market" required maxlength="2" value="NL"', response.data)
+        self.assertIn(b'name="timezone" required value="system"', response.data)
+
+        data = {"csrf": web.csrf, "client_id": "a" * 32, "target": "0" * 22,
+                "market": "us", "timezone": "Asia/Tokyo"}
+        store.set_cached("liked_tracks_cache", "2026-01-01", ["old"])
+        store.start_request("Liked tracks", datetime(2026, 1, 1, tzinfo=timezone.utc), "Read")
+        response = self.client.post("/configure", data=data, environ_overrides=self.remote)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual((store.get("market"), store.get("timezone")), ("US", "Asia/Tokyo"))
+        self.assertIn(b'name="market" required maxlength="2" value="US"', response.data)
+        self.assertIn(b'name="timezone" required value="Asia/Tokyo"', response.data)
+        self.assertIsNone(store.get_cached("liked_tracks_cache", "2026-01-01"))
+        self.assertEqual(store.request_overview("2026-01-01")["requests"], 0)
+        self.assertEqual(store.get("refresh_token"), "saved")
+        self.assertIsNotNone(store.get("followed_artists_cache"))
+
+        for field, invalid in (("market", "123"), ("market", ""), ("timezone", "Invalid/Zone")):
+            with self.subTest(field=field):
+                response = self.client.post(
+                    "/configure", data=dict(data, **{field: invalid}), environ_overrides=self.remote
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual((store.get("market"), store.get("timezone")), ("US", "Asia/Tokyo"))
+
+        without_new_fields = {key: value for key, value in data.items() if key not in ("market", "timezone")}
+        self.client.post("/configure", data=without_new_fields, environ_overrides=self.remote)
+        self.assertEqual((store.get("market"), store.get("timezone")), ("US", "Asia/Tokyo"))
+
+    def test_market_change_is_blocked_while_playlist_write_is_uncertain(self):
+        store = self.isolated_store()
+        store.set_many({"client_id": "a" * 32, "market": "NL"})
+        history = store.start()
+        store.prepare(history, "0" * 22, ["old"], ["new"], [], "detail")
+        response = self.client.post(
+            "/configure", data={"csrf": web.csrf, "client_id": "a" * 32, "target": "0" * 22,
+                                "market": "US", "timezone": "system"},
+            environ_overrides=self.remote,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"keep the original market", response.data)
+        self.assertEqual(store.get("market"), "NL")
 
     def test_show_configuration_persists_and_rejects_invalid_entries(self):
         news = "1" * 22
@@ -324,6 +372,7 @@ class WebTests(unittest.TestCase):
 
     def test_scheduler_runs_five_times_in_amsterdam_time(self):
         amsterdam = ZoneInfo("Europe/Amsterdam")
+        self.isolated_store().set_many({"timezone": "Europe/Amsterdam"})
 
         for date in ((2026, 1, 15), (2026, 7, 15)):
             with self.subTest(date=date):
@@ -345,7 +394,26 @@ class WebTests(unittest.TestCase):
                     for hour in (6, 10, 14, 18, 22)
                 ])
                 self.assertEqual(clock.now.call_count, 26)
-                self.assertTrue(all(c.args[0].key == "Europe/Amsterdam" for c in clock.now.call_args_list))
+                self.assertTrue(all(c.args[0] == timezone.utc for c in clock.now.call_args_list))
+
+    def test_scheduler_uses_timezone_changes_without_restart(self):
+        store = self.isolated_store()
+        store.set_many({"timezone": "UTC"})
+        utc_times = [
+            datetime(2026, 1, 15, 6, tzinfo=timezone.utc),
+            datetime(2026, 1, 15, 21, tzinfo=timezone.utc),
+        ]
+
+        def change_timezone(key):
+            store.set_many({"timezone": "Asia/Tokyo"})
+
+        with patch("app.web.datetime") as clock, \
+             patch("app.web.run_refresh", side_effect=change_timezone) as run, \
+             patch("app.web.time.sleep", side_effect=[None, StopIteration]):
+            clock.now.side_effect = lambda tz: utc_times.pop(0)
+            with self.assertRaises(StopIteration):
+                web.scheduler()
+        self.assertEqual(run.call_args_list, [call("2026-01-15 06:00"), call("2026-01-16 06:00")])
 
 
 if __name__ == "__main__":
