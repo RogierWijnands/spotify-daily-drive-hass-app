@@ -57,7 +57,7 @@ https://open.spotify.com/show/3Ab6DGFJL7VE5ToIH4r6w1, 1
 
 ## History and requests
 
-- **History:** shows source origins, selection details, errors and, for successful refreshes, the music count and playlist-ordered items. Successful status includes the number of source errors; a show with too few episodes is not itself an error. Failed refreshes retain available selection details. Spotify error messages, reason codes and `Retry-After` are shown when available; the app does not automatically retry.
+- **History:** shows the latest refresh; expand earlier refreshes and load more in batches of 10. Details include source origins, errors and playlist items. Successful status counts source errors, not episode shortfalls. Spotify error messages, reason codes and `Retry-After` are shown when available; the app does not automatically retry.
 - **Per refresh:** History shows Spotify API requests, token requests and cache hits separately, including failed and verification requests. A cache hit is a reused source or artist release track list, not necessarily one avoided request. Older entries have no counts.
 - **Today:** the web UI counts API and token requests by category, including unsuccessful responses, network errors and invalid JSON. It records the first HTTP 429 or `QUOTA_EXCEEDED` response with its request number, category and available details. Counts persist across restarts, reset for display at local midnight and are cleared with stored data. Reload to update; these are app counts, not Spotify's rolling quota or remaining allowance.
 

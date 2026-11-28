@@ -16,7 +16,7 @@ from .constants import (
     AUTOMATIC_REFRESH_TIMES_KEY, BYTES_PER_MEBIBYTE,
     DEFAULT_SPOTIFY_MARKET, DEFAULT_TIMEZONE, EMPTY_ARTIST_POOL_ERROR, EMPTY_GROUP_ERROR,
     EMPTY_GROUP_HISTORY_MARKER, HISTORY_ERROR_MARKERS,
-    HISTORY_LIKED_TRACKS_LABEL, HISTORY_RECENT_TRACKS_LABEL, HISTORY_SOURCE_PLAYLIST_PREFIX,
+    HISTORY_LIKED_TRACKS_LABEL, HISTORY_PAGE_SIZE, HISTORY_RECENT_TRACKS_LABEL, HISTORY_SOURCE_PLAYLIST_PREFIX,
     HISTORY_STATUS_SUCCEEDED, HISTORY_TOP_ARTISTS_PREFIX,
     HISTORY_TOP_TRACKS_PREFIX, HOME_ASSISTANT_INGRESS_IP, ITEMS_DETAIL_SEPARATOR,
     LONG_TERM, MAX_REQUEST_BODY_BYTES, MEDIUM_TERM, MISSING_SPOTIFY_REFRESH_TOKEN_ERROR,
@@ -181,7 +181,15 @@ def home(message=None, status=HTTPStatus.OK):
     with oauth_lock:
         auth_url = oauth.get("url")
 
-    history = store.history()
+    pages = request.args.get("history_pages", "1")
+    # Keep the requested limit within SQLite's signed 64-bit integer range.
+    if not pages.isascii() or not pages.isdigit() or len(pages) > 17 or int(pages) < 1:
+        abort(HTTPStatus.BAD_REQUEST, "Invalid history page count")
+    history_pages = int(pages)
+    history_limit = history_pages * HISTORY_PAGE_SIZE
+    history = store.history(history_limit + 1)
+    history_has_more = len(history) > history_limit
+    history = history[:history_limit]
     for entry_index, entry in enumerate(history):
         summary, separator, items = entry["detail"].partition(ITEMS_DETAIL_SEPARATOR)
         if not separator:
@@ -235,6 +243,8 @@ def home(message=None, status=HTTPStatus.OK):
         connected=bool(store.get("refresh_token")),
         pending=store.pending(),
         history=history,
+        history_pages=history_pages,
+        history_has_more=history_has_more,
         succeeded_status=HISTORY_STATUS_SUCCEEDED,
         automatic_refresh_enabled=store.automatic_refresh_enabled(),
         request_day=request_day,

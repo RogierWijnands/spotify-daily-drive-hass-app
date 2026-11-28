@@ -202,6 +202,73 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"artist release ID album123", response.data)
         self.assertNotIn(b"<td>Release tracks</td>", response.data)
 
+    def test_history_shows_latest_and_loads_older_entries_in_batches(self):
+        store = self.isolated_store()
+        for number in range(1, 26):
+            store.finish(store.start(), "failed", f"refresh-{number:03d}-done")
+
+        for pages, expected, has_more in ((1, 10, True), (2, 20, True), (3, 25, False)):
+            with self.subTest(pages=pages):
+                url = "/" if pages == 1 else f"/?history_pages={pages}"
+                html = self.client.get(url, environ_overrides=self.remote).data.decode()
+                disclosure = '<details id="earlier-refreshes" class="history-older"'
+                self.assertIn(disclosure + (">" if pages == 1 else " open>"), html)
+                latest, older = html.split(disclosure, 1)
+                self.assertIn("refresh-025-done", latest)
+                self.assertNotIn("refresh-024-done", latest)
+                for number in range(1, 25):
+                    self.assertEqual(f"refresh-{number:03d}-done" in older, number > 25 - expected)
+                self.assertEqual(
+                    [html.index(f"refresh-{number:03d}-done") for number in range(25, 25 - expected, -1)],
+                    sorted(html.index(f"refresh-{number:03d}-done") for number in range(25, 25 - expected, -1)),
+                )
+                self.assertEqual(html.count('<tr class="history-failed"'), expected)
+                self.assertEqual("Load more</a>" in html, has_more)
+                if has_more:
+                    self.assertIn(f'href="./?history_pages={pages + 1}#history-entry-{expected}"', html)
+                if pages > 1:
+                    self.assertIn(f'id="history-entry-{(pages - 1) * 10}"', older)
+        self.assertEqual(len(store.history(26)), 25)
+
+    def test_history_pagination_boundaries_and_ingress(self):
+        store = self.isolated_store()
+        html = self.client.get("/", environ_overrides=self.remote).data
+        self.assertIn(b"No refreshes yet.", html)
+        self.assertNotIn(b"Earlier refreshes", html)
+
+        for number in range(1, 21):
+            store.finish(store.start(), "failed", f"entry {number}")
+            if number in (1, 10, 11, 20):
+                response = self.client.get("/", environ_overrides={
+                    **self.remote, "SCRIPT_NAME": "/api/hassio_ingress/example",
+                })
+                self.assertEqual(b"Earlier refreshes" in response.data, number > 1)
+                self.assertEqual(b"Load more</a>" in response.data, number > 10)
+        response = self.client.get("/?history_pages=2", environ_overrides=self.remote)
+        self.assertNotIn(b"Load more</a>", response.data)
+        for invalid in ("0", "-1", "abc", "123456789012345678"):
+            self.assertEqual(
+                self.client.get(f"/?history_pages={invalid}", environ_overrides=self.remote).status_code, 400,
+            )
+
+    def test_loaded_history_keeps_error_links_and_request_counts(self):
+        store = self.isolated_store()
+        entry = store.start()
+        store.finish(
+            entry, "succeeded",
+            "older refresh\nSelection:\n"
+            "Top tracks short term: 0 results because the fetch failed.\n"
+            "Source error: Skipping short-term top tracks: unavailable",
+        )
+        store.save_request_stats(entry, RefreshRequestStats(5, 1, 2))
+        for _ in range(10):
+            store.finish(store.start(), "failed", "newer refresh")
+
+        html = self.client.get("/?history_pages=2", environ_overrides=self.remote).data.decode()
+        self.assertIn('href="#history-10-error-1"', html)
+        self.assertIn('id="history-10-error-1"', html)
+        self.assertIn("Spotify API requests: 5;\ntoken requests: 1; cache hits: 2.", html)
+
     def test_history_links_source_playlist_error_to_matching_playlist(self):
         entry = {"started": "2026-01-01", "status": "succeeded",
                  "detail": "90 minutes\nSelection:\n"

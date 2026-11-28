@@ -125,9 +125,8 @@
         <p class="section-description">A closer look at each refresh.</p></div>
     </div>
     {% if history %}
-    <div class="table-wrap"><table class="history-table">
-      <thead><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr></thead>
-      <tbody>{% for entry in history %}<tr class="history-{{ entry.status }}"><td>{{ entry.started }}</td><td>{{ entry.status }}{% if entry.status == succeeded_status and entry.error_count %} ({{ entry.error_count }} error{{ "s" if entry.error_count != 1 else "" }}){% endif %}</td><td>{{ entry.summary }}
+    {% macro history_row(entry, entry_index) %}
+      <tr class="history-{{ entry.status }}" id="history-entry-{{ entry_index }}"><td>{{ entry.started }}</td><td>{{ entry.status }}{% if entry.status == succeeded_status and entry.error_count %} ({{ entry.error_count }} error{{ "s" if entry.error_count != 1 else "" }}){% endif %}</td><td>{{ entry.summary }}
       {% if entry.request_stats %}<br>Spotify API requests: {{ entry.request_stats.api_requests }};
 token requests: {{ entry.request_stats.token_requests }}; cache hits: {{ entry.request_stats.cache_hits }}.{% endif %}
       {% if entry.selection %}<details><summary>How this playlist was selected</summary><ul>
@@ -137,8 +136,22 @@ token requests: {{ entry.request_stats.token_requests }}; cache hits: {{ entry.r
       </ul></details>{% endif %}
       {% if entry.items_list %}<details><summary>Show playlist items</summary><ol>
       {% for item in entry.items_list %}<li>{{ item }}</li>{% endfor %}
-      </ol></details>{% endif %}</td></tr>{% endfor %}</tbody>
+      </ol></details>{% endif %}</td></tr>
+    {% endmacro %}
+    <div class="table-wrap"><table class="history-table">
+      <thead><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr></thead>
+      <tbody>{{ history_row(history[0], 0) }}</tbody>
     </table></div>
+    {% if history | length > 1 %}
+    <details id="earlier-refreshes" class="history-older"{% if history_pages > 1 %} open{% endif %}>
+      <summary>Earlier refreshes</summary>
+      <div class="table-wrap"><table class="history-table">
+        <thead><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr></thead>
+        <tbody>{% for entry in history[1:] %}{{ history_row(entry, loop.index) }}{% endfor %}</tbody>
+      </table></div>
+      {% if history_has_more %}<a class="button button-secondary history-load-more" href="./?history_pages={{ history_pages + 1 }}#history-entry-{{ history | length }}">Load more</a>{% endif %}
+    </details>
+    {% endif %}
     <p class="panel-footnote">Cache hits count reused cached sources or artist release track lists, not necessarily requests avoided.
       Token requests are counted separately from Spotify API requests.</p>
     {% else %}<p class="empty-state">No refreshes yet. Your history will appear here after your first refresh.</p>{% endif %}

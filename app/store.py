@@ -280,13 +280,12 @@ class Store:
         with self.connect() as db:
             db.execute("VACUUM")
 
-    def history(self):
-        # Keep older entries in SQLite; the web UI only needs the most recent ones.
+    def history(self, limit=HISTORY_ENTRY_LIMIT):
         with self.connect() as db:
             return [dict(row) for row in db.execute(
                 "SELECT started, status, detail, api_requests, token_requests, cache_hits "
                 "FROM history ORDER BY id DESC LIMIT ?",
-                (HISTORY_ENTRY_LIMIT,),
+                (limit,),
             )]
 
     def start(self, scheduled_key=None):
