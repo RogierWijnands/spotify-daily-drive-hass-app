@@ -125,15 +125,17 @@ class WebTests(unittest.TestCase):
         self.assertIn(b'<details class="panel disclosure settings" open>', page.data)
         self.assertIn(b"Complete connection", page.data)
 
-    def test_stylesheet_uses_ingress_prefix_and_requires_ingress(self):
-        page = self.client.get("/", environ_overrides={
-            **self.remote, "SCRIPT_NAME": "/api/hassio_ingress/example",
-        })
-        self.assertIn(b'href="/api/hassio_ingress/example/static/style.css"', page.data)
-        self.assertEqual(self.client.get("/static/style.css").status_code, 403)
-        stylesheet = self.client.get("/static/style.css", environ_overrides=self.remote)
-        self.addCleanup(stylesheet.close)
-        self.assertEqual(stylesheet.status_code, 200)
+    def test_stylesheet_is_included_with_or_without_ingress_script_name(self):
+        for script_name in ("", "/api/hassio_ingress/example"):
+            with self.subTest(script_name=script_name):
+                page = self.client.get("/", environ_overrides={
+                    **self.remote, "SCRIPT_NAME": script_name,
+                    "HTTP_X_INGRESS_PATH": "/api/hassio_ingress/example",
+                })
+                self.assertEqual(page.status_code, 200)
+                self.assertIn(b"<style>", page.data)
+                self.assertIn(b".control-panel", page.data)
+                self.assertNotIn(b'rel="stylesheet"', page.data)
 
     def test_request_overview_uses_artist_release_name_for_existing_counts(self):
         store = self.isolated_store()
