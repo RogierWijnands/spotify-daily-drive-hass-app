@@ -48,6 +48,7 @@ HISTORY_STATUS_IN_PROGRESS = "in_progress"
 HISTORY_STATUS_SUCCEEDED = "succeeded"
 HISTORY_STATUS_FAILED = "failed"
 HISTORY_STATUS_UNCERTAIN = "uncertain"
+HISTORY_OUTCOME_PREFIX = "Refresh outcome: "
 
 DAILY_DRIVE_SOURCE_PLAYLIST_ERROR = "Daily Drive cannot also be a music source"
 MAX_PLAYLIST_ITEMS_ERROR = "Spotify allows at most {max_items} items per replacement"

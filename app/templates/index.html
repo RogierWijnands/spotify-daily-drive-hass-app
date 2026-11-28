@@ -126,7 +126,7 @@
     </div>
     {% if history %}
     {% macro history_row(entry, entry_index) %}
-      <tr class="history-{{ entry.status }}" id="history-entry-{{ entry_index }}"><td>{{ entry.started }}</td><td>{{ entry.status }}{% if entry.status == succeeded_status and entry.error_count %} ({{ entry.error_count }} error{{ "s" if entry.error_count != 1 else "" }}){% endif %}</td><td>{{ entry.summary }}
+      <tr class="history-{{ entry.status_class }}" id="history-entry-{{ entry_index }}"><td>{{ entry.started }}</td><td>{{ entry.display_status }}</td><td>{{ entry.summary }}
       {% if entry.request_stats %}<br>Spotify API requests: {{ entry.request_stats.api_requests }};
 token requests: {{ entry.request_stats.token_requests }}; cache hits: {{ entry.request_stats.cache_hits }}.{% endif %}
       {% if entry.selection %}<details><summary>How this playlist was selected</summary><ul>

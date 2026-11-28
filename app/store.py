@@ -6,15 +6,22 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .constants import (
-    AUTOMATIC_REFRESH_ENABLED_KEY, AUTOMATIC_REFRESH_TIMES_KEY, CACHE_KEY_SUFFIX,
+    AUTOMATIC_REFRESH_ENABLED_KEY, AUTOMATIC_REFRESH_TIMES_KEY,
     DATABASE_CONNECTION_TIMEOUT_SECONDS, DEFAULT_AUTOMATIC_REFRESH_ENABLED,
     DEFAULT_AUTOMATIC_REFRESH_TIMES, FOLLOWED_ARTISTS_CACHE_KEY,
+    DISCOVERY_TRACKS_CACHE_KEY,
     HISTORY_ENTRY_LIMIT, HISTORY_STATUS_FAILED, HISTORY_STATUS_IN_PROGRESS,
     HISTORY_STATUS_SUCCEEDED, HISTORY_STATUS_UNCERTAIN, ITEMS_DETAIL_SEPARATOR,
     NO_UNCERTAIN_CHANGE_ERROR, REQUEST_CATEGORY_ARTIST_RELEASES, REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS,
     REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY,
-    SELECTION_DETAIL_SEPARATOR, SHOW_EPISODE_CACHE_PREFIX,
+    SELECTION_DETAIL_SEPARATOR,
 )
+
+
+def _cache_has_content(key, value):
+    if key == DISCOVERY_TRACKS_CACHE_KEY and isinstance(value, dict):
+        return bool(value.get("discoveries") or value.get("collaborators"))
+    return bool(value)
 
 
 def selection_details(detail):
@@ -61,6 +68,9 @@ class Store:
                     episodes TEXT NOT NULL, detail TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS daily_cache (
+                    key TEXT PRIMARY KEY, day TEXT NOT NULL, value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fallback_cache (
                     key TEXT PRIMARY KEY, day TEXT NOT NULL, value TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS daily_requests (
@@ -141,6 +151,7 @@ class Store:
         with self.connect() as db:
             if clear_cache or clear_daily_cache:
                 db.execute("DELETE FROM daily_cache")
+                db.execute("DELETE FROM fallback_cache")
             if clear_cache:
                 db.execute("DELETE FROM settings WHERE key=?", (FOLLOWED_ARTISTS_CACHE_KEY,))
             if clear_request_stats:
@@ -153,12 +164,7 @@ class Store:
             )
 
     def get_cached(self, key, day):
-        # Episodes are usable only on their fetch day; music can serve as an older fallback.
         with self.connect() as db:
-            db.execute(
-                "DELETE FROM daily_cache WHERE day != ? AND key GLOB ?",
-                (day, f"{SHOW_EPISODE_CACHE_PREFIX}*{CACHE_KEY_SUFFIX}"),
-            )
             row = db.execute(
                 "SELECT value FROM daily_cache WHERE key=? AND day=?", (key, day)
             ).fetchone()
@@ -169,10 +175,40 @@ class Store:
             row = db.execute(
                 "SELECT day, value FROM daily_cache WHERE key=? AND day<?", (key, day)
             ).fetchone()
+            backup = db.execute(
+                "SELECT day, value FROM fallback_cache WHERE key=? AND day<=?", (key, day)
+            ).fetchone()
+            if backup and (
+                not row or not _cache_has_content(key, json.loads(row["value"]))
+                or backup["day"] >= row["day"]
+            ):
+                row = backup
         return (row["day"], json.loads(row["value"])) if row else None
+
+    def set_fallback(self, key, day, value):
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO fallback_cache (key, day, value) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET day=excluded.day, value=excluded.value "
+                "WHERE excluded.day >= fallback_cache.day",
+                (key, day, json.dumps(value)),
+            )
 
     def set_cached(self, key, day, value):
         with self.connect() as db:
+            if not _cache_has_content(key, value):
+                previous = db.execute(
+                    "SELECT day, value FROM daily_cache WHERE key=?", (key,)
+                ).fetchone()
+                if previous and _cache_has_content(key, json.loads(previous["value"])):
+                    db.execute(
+                        "INSERT INTO fallback_cache (key, day, value) VALUES (?, ?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET day=excluded.day, value=excluded.value "
+                        "WHERE excluded.day >= fallback_cache.day",
+                        (key, previous["day"], previous["value"]),
+                    )
+            else:
+                db.execute("DELETE FROM fallback_cache WHERE key=? AND day<=?", (key, day))
             db.execute(
                 "INSERT OR REPLACE INTO daily_cache (key, day, value) VALUES (?, ?, ?)",
                 (key, day, json.dumps(value)),
@@ -269,6 +305,7 @@ class Store:
             if db.execute("SELECT 1 FROM pending LIMIT 1").fetchone():
                 raise ValueError("Resolve the uncertain playlist change before clearing data")
             db.execute("DELETE FROM daily_cache")
+            db.execute("DELETE FROM fallback_cache")
             db.execute("DELETE FROM settings WHERE key=?", (FOLLOWED_ARTISTS_CACHE_KEY,))
             db.execute("DELETE FROM episodes")
             db.execute("DELETE FROM history")

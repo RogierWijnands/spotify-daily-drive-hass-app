@@ -9,7 +9,7 @@ from .constants import (
     CACHE_KEY_SUFFIX, COLLABORATOR_ARTIST_RELEASE_GROUPS, COMBINED_ARTIST_RELEASE_LOOKUP_PREFIX,
     DISCOVERY_TRACKS_CACHE_KEY, DURATION_TOLERANCE_MINUTES, EMPTY_ARTIST_POOL_ERROR,
     EMPTY_GROUP_ERROR, EPISODE_TYPE,
-    HISTORY_TOP_ARTISTS_PREFIX, ITEMS_DETAIL_SEPARATOR, LIKED_TRACKS_CACHE_KEY, LONG_TERM,
+    HISTORY_OUTCOME_PREFIX, HISTORY_TOP_ARTISTS_PREFIX, ITEMS_DETAIL_SEPARATOR, LIKED_TRACKS_CACHE_KEY, LONG_TERM,
     MAX_ARTISTS_FOR_DISCOVERY, MAX_COLLABORATORS_FOR_DISCOVERY, MAX_RELEASES_PER_ARTIST,
     MAX_RELEASES_PER_ARTIST_TEXT, MAX_SPOTIFY_PLAYLIST_ITEMS, MAX_TRACKS_PER_CANDIDATE_GROUP,
     MEDIUM_TERM, MILLISECONDS_PER_MINUTE, MILLISECONDS_PER_SECOND, MUSIC_GROUP_NAMES,
@@ -31,7 +31,7 @@ from .constants import (
     ZERO_ARTIST_RELEASE_LISTS_ERROR, ZERO_SHOW_EPISODES_ERROR,
 )
 from .request_stats import record_cache_hit
-from .spotify import SpotifyCachedError, SpotifyError, SpotifyPartialError
+from .spotify import SpotifyCachedError, SpotifyError, SpotifyPartialError, source_item_uri
 
 log = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def source_issue_lines(issues):
     ]
 
 
-def get_api_items(source, fetch, issues=None):
+def get_api_items(source, fetch, issues=None, cached_uris=None):
     # Fetch items from one source, whether the result is a list or an API page.
     try:
         result = fetch()
@@ -80,6 +80,11 @@ def get_api_items(source, fetch, issues=None):
             raise SpotifyError("Spotify returned an invalid item list")
         return result
     except SpotifyCachedError as exc:
+        if cached_uris is not None:
+            for entry in exc.cached_items:
+                uri = source_item_uri(entry)
+                if uri:
+                    cached_uris.add(uri)
         api_warning(issues, SOURCE_CACHED_PREFIX + "%s after an error: %s", source, exc)
         return exc.items
     except SpotifyPartialError as exc:
@@ -101,7 +106,7 @@ def source_error(issues, source):
     return any(issue.startswith(prefixes) for issue in (issues or []))
 
 
-def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
+def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None, outcomes=None):
     news = []
     other_podcasts = []
     seen = set()
@@ -149,8 +154,14 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
             fetched = list(current)
             cache_key = f"{SHOW_EPISODE_CACHE_PREFIX}{show}{CACHE_KEY_SUFFIX}"
             cached = api.cached_today(cache_key)
+            cache_origin = "today's cache"
             if cached is None:
-                cached = []
+                previous = api.cached_previous(cache_key)
+                if previous is None:
+                    cached = []
+                else:
+                    cached_day, cached = previous
+                    cache_origin = f"cache from {cached_day}"
             if not isinstance(cached, list):
                 raise SpotifyError(f"Invalid cached episodes for show {show}")
 
@@ -166,6 +177,16 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
 
             if reused:
                 record_cache_hit()
+
+            if outcomes is not None:
+                state = outcomes.setdefault(
+                    category.lower(), {"failed": False, "cached": False, "count": 0, "missing": 0}
+                )
+                state["failed"] |= failed
+                state["cached"] |= bool(reused)
+                state["count"] += len(current)
+                if failed:
+                    state["missing"] += count - len(current)
 
             # Keep today's newest fetched episodes, including successful pages before an error.
             if fetched:
@@ -203,11 +224,11 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
                     if reused:
                         noun = "episode" if reused == 1 else "episodes"
                         cache_detail = (
-                            f" {reused} previously fetched {noun} reused from today's cache "
+                            f" {reused} previously fetched {noun} reused from {cache_origin} "
                             "after a Spotify error."
                         )
                     else:
-                        cache_detail = " No episodes from today's cache were available."
+                        cache_detail = " No cached episodes were available."
                 failure_detail = (
                     f" {ZERO_SHOW_EPISODES_ERROR}." if failed and not current else ""
                 )
@@ -232,9 +253,11 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
     ]
 
 
-def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
+def music_candidates(api, playlist_ids, rng, issues=None, trace=None, outcomes=None):
     if issues is None:
         issues = []
+    initial_issue_count = len(issues)
+    cached_uris = set()
 
     def cached_items(key, path, trace_target=None, **params):
         def fetch():
@@ -260,20 +283,20 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
 
     # Each source can fail independently without blocking the other sources.
     short_term_top_tracks = get_api_items(
-        SOURCE_SHORT_TERM_TOP_TRACKS, lambda: cached_top_items("tracks", SHORT_TERM), issues
+        SOURCE_SHORT_TERM_TOP_TRACKS, lambda: cached_top_items("tracks", SHORT_TERM), issues, cached_uris
     )
     medium_term_top_tracks = get_api_items(
-        SOURCE_MEDIUM_TERM_TOP_TRACKS, lambda: cached_top_items("tracks", MEDIUM_TERM), issues
+        SOURCE_MEDIUM_TERM_TOP_TRACKS, lambda: cached_top_items("tracks", MEDIUM_TERM), issues, cached_uris
     )
     long_term_top_tracks = get_api_items(
-        SOURCE_LONG_TERM_TOP_TRACKS, lambda: cached_top_items("tracks", LONG_TERM), issues
+        SOURCE_LONG_TERM_TOP_TRACKS, lambda: cached_top_items("tracks", LONG_TERM), issues, cached_uris
     )
     recent_entries = get_api_items(
         SOURCE_RECENT_TRACKS,
         lambda: cached_items(
             RECENT_TRACKS_CACHE_KEY, SPOTIFY_RECENT_TRACKS_PATH, limit=SPOTIFY_PAGE_SIZE
         ),
-        issues,
+        issues, cached_uris,
     )
     recently_played_tracks = [
         entry.get("track") for entry in recent_entries if isinstance(entry, dict)
@@ -287,7 +310,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
             return api.daily_cached(LIKED_TRACKS_CACHE_KEY, fetch)
         return api.daily_cached(LIKED_TRACKS_CACHE_KEY, fetch, trace=trace)
 
-    liked_track_cache = get_api_items(SOURCE_LIKED_TRACKS, fetch_liked_tracks, issues)
+    liked_track_cache = get_api_items(SOURCE_LIKED_TRACKS, fetch_liked_tracks, issues, cached_uris)
     liked_tracks = [
         entry.get("track") for entry in liked_track_cache if isinstance(entry, dict)
     ]
@@ -336,7 +359,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                 ),
                 trace=trace,
             ),
-            issues,
+            issues, cached_uris,
         )
         configured.extend(
             entry.get("item")
@@ -386,12 +409,46 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
             api, artists, rng, discovery_issues, discovery_trace
         )
 
-        # Save partial results too: discovery is attempted only once per local day.
+        fallback_day = None
+        fallback_uris = []
+        if discovery_issues or (not artists and artist_source_issues):
+            previous = api.cached_previous(DISCOVERY_TRACKS_CACHE_KEY)
+            if previous is not None:
+                previous_day, cached = previous
+                if (not isinstance(cached, dict)
+                        or not isinstance(cached.get("discoveries"), list)
+                        or not isinstance(cached.get("collaborators"), list)):
+                    raise SpotifyError("Invalid cached discovery tracks")
+                fresh_uris = {source_item_uri(item) for item in discoveries + collaborator_tracks}
+                old_discoveries = [
+                    item for item in cached["discoveries"]
+                    if item not in discoveries and (
+                        source_item_uri(item) is None or source_item_uri(item) not in fresh_uris
+                    )
+                ]
+                old_collaborators = [
+                    item for item in cached["collaborators"]
+                    if item not in collaborator_tracks and (
+                        source_item_uri(item) is None or source_item_uri(item) not in fresh_uris
+                    )
+                ]
+                if old_discoveries or old_collaborators:
+                    discoveries.extend(old_discoveries)
+                    collaborator_tracks.extend(old_collaborators)
+                    fallback_day = previous_day
+                    fallback_uris = [
+                        item["uri"] for item in old_discoveries + old_collaborators
+                        if isinstance(item, dict) and isinstance(item.get("uri"), str)
+                    ]
+                    record_cache_hit()
+
         return {
             "discoveries": discoveries,
             "collaborators": collaborator_tracks,
             "issues": discovery_issues + (artist_source_issues if not artists else []),
             "selection": discovery_trace[:2],
+            "fallback_day": fallback_day,
+            "fallback_uris": fallback_uris,
         }
 
     discovery_cache = api.daily_cached(DISCOVERY_TRACKS_CACHE_KEY, fetch_discoveries)
@@ -428,6 +485,13 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
 
     discoveries = discovery_cache["discoveries"]
     collaborator_tracks = discovery_cache["collaborators"]
+    fallback_day = discovery_cache.get("fallback_day")
+    if fallback_day is not None and not isinstance(fallback_day, str):
+        raise SpotifyError("Invalid cached discovery fallback date")
+    fallback_uris = discovery_cache.get("fallback_uris", [])
+    if not isinstance(fallback_uris, list) or not all(isinstance(uri, str) for uri in fallback_uris):
+        raise SpotifyError("Invalid cached discovery fallback items")
+    cached_uris.update(fallback_uris)
     if discovery_fetched:
         issues.extend(discovery_issues)
         if trace is not None:
@@ -435,6 +499,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
             trace.append(
                 f"Discovery tracks: {len(discoveries)} artist tracks and "
                 f"{len(collaborator_tracks)} collaborator tracks saved in today's cache."
+                + (f" Results include cache from {fallback_day} after an error." if fallback_day else "")
             )
     else:
         issues.extend(f"{issue} (during an earlier discovery fetch today)"
@@ -445,8 +510,16 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                 f"Discovery tracks: reused from today's cache{origin}; "
                 f"{len(discoveries)} artist tracks and {len(collaborator_tracks)} collaborator tracks; "
                 "no artist release or artist release track requests during this refresh."
+                + (f" Results include cache from {fallback_day} after an error." if fallback_day else "")
             )
             trace.extend(f"Earlier today: {line}" for line in discovery_cache["selection"])
+
+    if outcomes is not None:
+        music_issues = issues[initial_issue_count:]
+        outcomes["music"] = {
+            "failed": any(is_source_error(issue) for issue in music_issues),
+            "cached_uris": cached_uris,
+        }
 
     groups = (
         top_and_recent_tracks, older_top_tracks, discoveries,
@@ -814,10 +887,11 @@ def interleave(music, podcasts, rng):
 def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None, trace=None):
     rng = rng or random.SystemRandom()
     issues = []
+    outcomes = {}
 
     # Gather candidates before selecting anything or changing the Spotify playlist.
-    podcasts = podcast_candidates(api, news_shows, podcast_shows, issues, trace)
-    groups = music_candidates(api, playlist_ids, rng, issues, trace)
+    podcasts = podcast_candidates(api, news_shows, podcast_shows, issues, trace, outcomes)
+    groups = music_candidates(api, playlist_ids, rng, issues, trace, outcomes)
     try:
         music = select_music(groups, podcasts, rng, trace, issues)
     except SpotifyError as exc:
@@ -844,6 +918,36 @@ def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None, trace=No
         f"podcasts {podcast_percentage:.1f}%"
     )
     if trace is not None:
+        present = []
+        if music:
+            present.append("music")
+        for category in ("news", "podcast"):
+            if outcomes.get(category, {}).get("count"):
+                present.append("podcasts" if category == "podcast" else category)
+        problems = []
+        for category in ("news", "podcast", "music"):
+            state = outcomes.get(category, {})
+            if not state.get("failed"):
+                continue
+            count = len(music) if category == "music" else state["count"]
+            description = f"{category} source error"
+            if not count:
+                description += f"; no {category} selected"
+            elif category != "music" and state["missing"]:
+                missing = state["missing"]
+                description += f"; {missing} requested {category} episode{'s' if missing != 1 else ''} unavailable"
+            cached = (
+                any(item["uri"] in state.get("cached_uris", set()) for item in music)
+                if category == "music" else state["cached"]
+            )
+            if cached:
+                description += "; cached results retrieved"
+            problems.append(description)
+        if problems:
+            trace.append(
+                HISTORY_OUTCOME_PREFIX + "error (" + "; ".join(problems)
+                + "; playlist contains " + ", ".join(present) + ")"
+            )
         trace.extend(source_issue_lines(issues))
     return result, [item["uri"] for item in podcasts], detail
 

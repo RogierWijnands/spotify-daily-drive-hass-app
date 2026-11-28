@@ -16,7 +16,8 @@ from .constants import (
     AUTOMATIC_REFRESH_TIMES_KEY, BYTES_PER_MEBIBYTE,
     DEFAULT_SPOTIFY_MARKET, DEFAULT_TIMEZONE, EMPTY_ARTIST_POOL_ERROR, EMPTY_GROUP_ERROR,
     EMPTY_GROUP_HISTORY_MARKER, HISTORY_ERROR_MARKERS,
-    HISTORY_LIKED_TRACKS_LABEL, HISTORY_PAGE_SIZE, HISTORY_RECENT_TRACKS_LABEL, HISTORY_SOURCE_PLAYLIST_PREFIX,
+    HISTORY_LIKED_TRACKS_LABEL, HISTORY_OUTCOME_PREFIX, HISTORY_PAGE_SIZE, HISTORY_RECENT_TRACKS_LABEL,
+    HISTORY_SOURCE_PLAYLIST_PREFIX,
     HISTORY_STATUS_SUCCEEDED, HISTORY_TOP_ARTISTS_PREFIX,
     HISTORY_TOP_TRACKS_PREFIX, HOME_ASSISTANT_INGRESS_IP, ITEMS_DETAIL_SEPARATOR,
     LONG_TERM, MAX_REQUEST_BODY_BYTES, MEDIUM_TERM, MISSING_SPOTIFY_REFRESH_TOKEN_ERROR,
@@ -196,6 +197,12 @@ def home(message=None, status=HTTPStatus.OK):
             summary, separator, items = entry["detail"].partition(TRACKS_DETAIL_SEPARATOR)
         summary, selection_separator, selection = summary.partition(SELECTION_DETAIL_SEPARATOR)
         selection_lines = selection.splitlines() if selection_separator else []
+        outcome = next(
+            (line.removeprefix(HISTORY_OUTCOME_PREFIX) for line in selection_lines
+             if line.startswith(HISTORY_OUTCOME_PREFIX)),
+            None,
+        )
+        selection_lines = [line for line in selection_lines if not line.startswith(HISTORY_OUTCOME_PREFIX)]
         entry["summary"] = summary
 
         # Older history used "Source warning" for errors too; keep its stored text unchanged.
@@ -209,6 +216,13 @@ def home(message=None, status=HTTPStatus.OK):
                     line = SOURCE_ERROR_PREFIX + detail
             display_lines.append(line)
         entry["error_count"] = error_count
+        entry["display_status"] = entry["status"]
+        entry["status_class"] = entry["status"]
+        if entry["status"] == HISTORY_STATUS_SUCCEEDED and (outcome or error_count):
+            entry["display_status"] = outcome or (
+                f"error ({error_count} source error{'s' if error_count != 1 else ''}; see details)"
+            )
+            entry["status_class"] = "error"
         entry["selection"] = _selection_lines_with_links(display_lines, entry_index)
         entry["items_list"] = items.splitlines() if separator else []
         entry["request_stats"] = (
@@ -245,7 +259,6 @@ def home(message=None, status=HTTPStatus.OK):
         history=history,
         history_pages=history_pages,
         history_has_more=history_has_more,
-        succeeded_status=HISTORY_STATUS_SUCCEEDED,
         automatic_refresh_enabled=store.automatic_refresh_enabled(),
         request_day=request_day,
         request_overview=request_overview,

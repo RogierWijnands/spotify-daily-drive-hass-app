@@ -121,9 +121,9 @@ th { color: #62736b; font-size: .68rem; text-transform: uppercase; letter-spacin
 th, td { padding: .9rem 1.5rem; vertical-align: top; border-top: 1px solid var(--line); }
 td { font-size: .83rem; overflow-wrap: anywhere; }
 .history-table th:first-child { width: 21%; }
-.history-table th:nth-child(2) { width: 15%; }
-.history-table td:nth-child(2) { white-space: nowrap; font-weight: 700; color: #276344; }
-.history-failed td:nth-child(2), .history-uncertain td:nth-child(2) { color: #a34a32; }
+.history-table th:nth-child(2) { width: 24%; }
+.history-table td:nth-child(2) { font-weight: 700; color: #276344; }
+.history-error td:nth-child(2), .history-failed td:nth-child(2), .history-uncertain td:nth-child(2) { color: #a34a32; }
 .history-in_progress td:nth-child(2) { color: #83611a; }
 .history-table details { margin-top: .65rem; }
 .history-table summary, .inner-disclosure summary { cursor: pointer; color: #276344; font-weight: 700; font-size: .8rem; }

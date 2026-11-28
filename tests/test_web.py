@@ -348,8 +348,8 @@ class WebTests(unittest.TestCase):
 
         response = self.client.get("/", environ_overrides=self.remote)
         self.assertIn(b"<td>succeeded</td><td>clean", response.data)
-        self.assertIn(b"<td>succeeded (1 error)</td><td>single", response.data)
-        self.assertIn(b"<td>succeeded (2 errors)</td><td>multiple", response.data)
+        self.assertIn(b"<td>error (1 source error; see details)</td><td>single", response.data)
+        self.assertIn(b"<td>error (2 source errors; see details)</td><td>multiple", response.data)
         self.assertIn(b"<td>failed</td><td>failed detail", response.data)
         self.assertIn(b"<td>uncertain</td><td>uncertain detail", response.data)
         self.assertIn(b"Source warning: Show news has 0 of 1 requested playable episodes", response.data)
@@ -357,6 +357,33 @@ class WebTests(unittest.TestCase):
         self.assertNotIn(b"Source warning: Skipping short-term top tracks", response.data)
         self.assertTrue(all(entry["status"] in ("succeeded", "failed", "uncertain")
                             for entry in Store(store.path).history()))
+
+    def test_history_shows_recorded_outcome_without_masking_failed_or_uncertain(self):
+        store = self.isolated_store()
+        outcome = ("Refresh outcome: error (news source error; cached results retrieved; "
+                   "podcast source error; no podcast selected; playlist contains music, news)")
+        for status in ("succeeded", "failed", "uncertain"):
+            store.finish(store.start(), status, f"detail {status}\nSelection:\n{outcome}\n"
+                         "Source error: Failed to fetch remaining episodes for show news: offline")
+        html = self.client.get("/", environ_overrides=self.remote).data.decode()
+        self.assertIn(f'<td>{outcome.removeprefix("Refresh outcome: ")}</td><td>detail succeeded', html)
+        self.assertIn('<td>failed</td><td>detail failed', html)
+        self.assertIn('<td>uncertain</td><td>detail uncertain', html)
+        self.assertNotIn("Refresh outcome:", html)
+
+    def test_confirmed_playlist_retains_recorded_error_outcome(self):
+        store = self.isolated_store()
+        entry = store.start()
+        detail = ("90 minutes\nSelection:\n"
+                  "Refresh outcome: error (news source error; cached results retrieved; playlist contains news)\n"
+                  "Source error: Failed to fetch remaining episodes for show news: offline")
+        store.prepare(entry, "target", [], ["episode"], ["episode"], detail)
+        store.finish(entry, "uncertain", "response lost")
+        store.resolve(True, "Confirmed afterwards; " + store.pending()["detail"])
+
+        html = self.client.get("/", environ_overrides=self.remote).data.decode()
+        self.assertIn("<td>error (news source error; cached results retrieved; playlist contains news)</td>", html)
+        self.assertIn("Confirmed afterwards; 90 minutes", html)
 
     def test_history_links_cached_discovery_failures_to_earlier_warning(self):
         entry = {

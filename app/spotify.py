@@ -62,7 +62,18 @@ class SpotifyPartialError(SpotifyError):
 
 
 class SpotifyCachedError(SpotifyPartialError):
-    pass
+    def __init__(self, error, items, cached_items):
+        super().__init__(error, items)
+        self.cached_items = cached_items
+
+
+def source_item_uri(entry):
+    if not isinstance(entry, dict):
+        return None
+    item = entry.get("track") or entry.get("item") or entry
+    if isinstance(item, dict) and isinstance(item.get("uri"), str):
+        return item["uri"]
+    return None
 
 
 def _request_category(method, path, params):
@@ -355,6 +366,10 @@ class Spotify:
         day = current_time(self.store, datetime).date().isoformat()
         self.store.set_cached(key, day, value)
 
+    def cached_previous(self, key):
+        day = current_time(self.store, datetime).date().isoformat()
+        return self.store.get_previous_cached(key, day)
+
     def daily_cached(self, key, fetch, trace=None):
         day = current_time(self.store, datetime).date().isoformat()
         cached = self.store.get_cached(key, day)
@@ -372,26 +387,39 @@ class Spotify:
         try:
             result = fetch()
         except (SpotifyError, requests.RequestException) as exc:
-            if isinstance(exc, SpotifyPartialError) and exc.items:
-                if trace is not None:
-                    trace.append(
-                        f"{label}: partially retrieved from Spotify during this refresh; not cached."
-                    )
-                raise
-
+            partial = exc.items if isinstance(exc, SpotifyPartialError) else []
             previous = self.store.get_previous_cached(key, day)
             if previous is not None:
                 cached_day, cached = previous
                 if not isinstance(cached, list):
                     raise SpotifyError(f"Invalid cached data for {label}") from exc
-                record_cache_hit()
-                if trace is not None:
-                    empty_detail = f"; {ZERO_FETCH_RESULTS}" if not cached else ""
-                    trace.append(
-                        f"{label}: Spotify fetch failed; reused cache from {cached_day}"
-                        f"{empty_detail}."
+                fresh_uris = {source_item_uri(item) for item in partial}
+                extra = [
+                    item for item in cached
+                    if item not in partial and (
+                        source_item_uri(item) is None or source_item_uri(item) not in fresh_uris
                     )
-                raise SpotifyCachedError(exc, cached) from exc
+                ]
+                if extra or not partial:
+                    if extra:
+                        record_cache_hit()
+                    if partial:
+                        self.store.set_fallback(key, day, partial + extra)
+                    if trace is not None:
+                        empty_detail = f"; {ZERO_FETCH_RESULTS}" if not (partial or extra) else ""
+                        trace.append(
+                            f"{label}: Spotify fetch failed; reused cache from {cached_day}"
+                            f"{empty_detail}."
+                        )
+                    raise SpotifyCachedError(exc, partial + extra, extra) from exc
+
+            if isinstance(exc, SpotifyPartialError) and exc.items:
+                self.store.set_fallback(key, day, partial)
+                if trace is not None:
+                    trace.append(
+                        f"{label}: partially retrieved from Spotify during this refresh; saved as fallback."
+                    )
+                raise
 
             if trace is not None:
                 trace.append(
