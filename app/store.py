@@ -1,12 +1,14 @@
 import json
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .constants import (
-    AUTOMATIC_REFRESH_ENABLED_KEY, CACHE_KEY_SUFFIX, DATABASE_CONNECTION_TIMEOUT_SECONDS,
-    DEFAULT_AUTOMATIC_REFRESH_ENABLED, FOLLOWED_ARTISTS_CACHE_KEY,
+    AUTOMATIC_REFRESH_ENABLED_KEY, AUTOMATIC_REFRESH_TIMES_KEY, CACHE_KEY_SUFFIX,
+    DATABASE_CONNECTION_TIMEOUT_SECONDS, DEFAULT_AUTOMATIC_REFRESH_ENABLED,
+    DEFAULT_AUTOMATIC_REFRESH_TIMES, FOLLOWED_ARTISTS_CACHE_KEY,
     HISTORY_ENTRY_LIMIT, HISTORY_STATUS_FAILED, HISTORY_STATUS_IN_PROGRESS,
     HISTORY_STATUS_SUCCEEDED, HISTORY_STATUS_UNCERTAIN, ITEMS_DETAIL_SEPARATOR,
     NO_UNCERTAIN_CHANGE_ERROR, REQUEST_CATEGORY_ARTIST_RELEASES, REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS,
@@ -20,6 +22,21 @@ def selection_details(detail):
     if not separator:
         return ""
     return SELECTION_DETAIL_SEPARATOR + selection.partition(ITEMS_DETAIL_SEPARATOR)[0]
+
+
+def validate_refresh_times(times):
+    message = "Enter at least one valid time in 24-hour format (HH:MM), one per line."
+    if not isinstance(times, (list, tuple)) or not times:
+        raise ValueError(message)
+    normalized = set()
+    for value in times:
+        if not isinstance(value, str):
+            raise ValueError(message)
+        match = re.fullmatch(r"([0-9]|[01][0-9]|2[0-3]):([0-5][0-9])", value.strip())
+        if not match:
+            raise ValueError(message)
+        normalized.add(f"{int(match.group(1)):02}:{match.group(2)}")
+    return sorted(normalized)
 
 
 class Store:
@@ -114,6 +131,9 @@ class Store:
         if not isinstance(enabled, bool):
             raise ValueError("Invalid automatic refresh setting")
         return enabled
+
+    def automatic_refresh_times(self):
+        return validate_refresh_times(self.get(AUTOMATIC_REFRESH_TIMES_KEY, DEFAULT_AUTOMATIC_REFRESH_TIMES))
 
     def set_many(self, values, *, clear_cache=False, clear_daily_cache=False,
                  clear_request_stats=False):

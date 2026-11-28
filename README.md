@@ -13,7 +13,7 @@ A Home Assistant app that combines your favorite music, discoveries, artist rele
 
 ## Settings and storage
 
-- **Automatic refresh:** enabled by default at **08:15, 12:15, 16:15 and 20:15**. Toggle it at the top of the web UI; manual refresh remains available and an ongoing refresh continues. The app must be running; missed times are not retried.
+- **Automatic refresh:** enabled by default at **08:15, 12:15, 16:15 and 20:15**. Edit the daily times or toggle the schedule at the top of the web UI; enter at least one time in 24-hour format, one per line. Manual refresh remains available and an ongoing refresh continues. The app must be running; missed times are not retried.
 - **Timezone:** defaults to the system timezone; override it with an IANA timezone such as `Europe/Amsterdam`. Schedules, daily caches and request counts use this timezone.
 - **Market:** a two-letter country code, default `NL`. Spotify determines supported markets and may prioritize the connected account's country.
 - Changing the market or timezone clears daily caches; changing the timezone also clears daily request statistics. The connection and followed artists are kept. Resolve an uncertain playlist change before changing the market. Data from before `0.1.27` used Amsterdam time and may reflect the old day boundary until the next local day or data removal.

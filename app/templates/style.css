@@ -68,6 +68,9 @@ h3 { font-size: 1.05rem; }
 .schedule .schedule-times { margin-bottom: .15rem; color: #fff; font-weight: 700; letter-spacing: .01em; }
 .schedule .subtle { color: #b0c3b4; font-size: .76rem; }
 .schedule .schedule-note { margin: .8rem 0 0; }
+.schedule-editor { margin-top: .9rem; }
+.schedule-editor summary { cursor: pointer; color: #d3f5b4; font-size: .83rem; font-weight: 700; }
+.schedule-editor form { margin-top: .8rem; }
 
 .button { display: inline-flex; align-items: center; justify-content: center; gap: .55rem; min-height: 42px; border: 1px solid transparent; border-radius: 10px; padding: .6rem 1rem; font-weight: 700; font-size: .84rem; transition: background .15s, border-color .15s; }
 .button-primary { background: var(--accent); color: #173c2c; padding-inline: 1.25rem; }

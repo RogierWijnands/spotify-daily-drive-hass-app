@@ -58,6 +58,15 @@
         <input type="hidden" name="enabled" value="{{ 'off' if automatic_refresh_enabled else 'on' }}">
         <button class="button button-outline" type="submit">{{ 'Disable' if automatic_refresh_enabled else 'Enable' }} automatic refresh</button>
       </form>
+      <details class="schedule-editor"{% if request.endpoint == 'configure_refresh_times' and message_is_error %} open{% endif %}>
+        <summary>Edit schedule</summary>
+        <form action="refresh-times" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <label>Refresh times (24-hour format, one per line)
+            <textarea name="refresh_times" rows="4" required>{{ request.form.get('refresh_times', '') if request.endpoint == 'configure_refresh_times' and message_is_error else refresh_times | join('\n') }}</textarea></label>
+          <p class="subtle">Enter at least one time, such as 08:15. Disable automatic refresh to stop the schedule.</p>
+          <button class="button button-primary" type="submit">Save schedule</button>
+        </form>
+      </details>
       <p class="subtle schedule-note">Changing this setting does not stop a refresh already in progress. Manual refresh remains available.</p>
     </div>
   </section>

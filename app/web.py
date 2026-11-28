@@ -12,7 +12,8 @@ from requests import RequestException
 from waitress import serve
 
 from .constants import (
-    ARTIST_RELEASE_ERROR_PREFIXES, ARTIST_RELEASE_SOURCE, AUTOMATIC_REFRESH_ENABLED_KEY, BYTES_PER_MEBIBYTE,
+    ARTIST_RELEASE_ERROR_PREFIXES, ARTIST_RELEASE_SOURCE, AUTOMATIC_REFRESH_ENABLED_KEY,
+    AUTOMATIC_REFRESH_TIMES_KEY, BYTES_PER_MEBIBYTE,
     DEFAULT_SPOTIFY_MARKET, DEFAULT_TIMEZONE, EMPTY_ARTIST_POOL_ERROR, EMPTY_GROUP_ERROR,
     EMPTY_GROUP_HISTORY_MARKER, HISTORY_ERROR_MARKERS,
     HISTORY_LIKED_TRACKS_LABEL, HISTORY_RECENT_TRACKS_LABEL, HISTORY_SOURCE_PLAYLIST_PREFIX,
@@ -37,7 +38,7 @@ from .spotify import (
     REDIRECT_URI, SpotifyError, authorization, callback_code, playlist_id, token_request,
     validate_market,
 )
-from .store import Store
+from .store import Store, validate_refresh_times
 from .timezones import current_time, validate_timezone
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -53,8 +54,6 @@ csrf = secrets.token_urlsafe(SECURE_TOKEN_ENTROPY_BYTES)
 # OAuth state is transient; refresh.lock protects account changes during a refresh.
 oauth = {}
 oauth_lock = threading.Lock()
-REFRESH_TIMES = ("08:15", "12:15", "16:15", "20:15")
-
 # Failures are linked only to the selection groups they could have emptied.
 GROUP_ERROR_SOURCES = MUSIC_GROUP_SOURCES
 
@@ -240,7 +239,7 @@ def home(message=None, status=HTTPStatus.OK):
         automatic_refresh_enabled=store.automatic_refresh_enabled(),
         request_day=request_day,
         request_overview=request_overview,
-        refresh_times=REFRESH_TIMES,
+        refresh_times=store.automatic_refresh_times(),
         timezone=timezone,
         timezone_display=timezone_display,
         storage_bytes=storage_bytes,
@@ -265,6 +264,20 @@ def configure_automatic_refresh():
         return home("Could not save automatic refresh setting; check the app log.",
                     HTTPStatus.INTERNAL_SERVER_ERROR)
     return home(f"Automatic refresh {'enabled' if enabled == 'on' else 'disabled'}.")
+
+
+@app.post("/refresh-times")
+def configure_refresh_times():
+    lines = request.form.get("refresh_times", "").splitlines()
+    try:
+        times = validate_refresh_times([line.strip() for line in lines if line.strip()])
+        store.set_many({AUTOMATIC_REFRESH_TIMES_KEY: times})
+    except ValueError as exc:
+        return home(str(exc), HTTPStatus.BAD_REQUEST)
+    except sqlite3.Error:
+        log.exception("Failed to save refresh times")
+        return home("Could not save refresh times; check the app log.", HTTPStatus.INTERNAL_SERVER_ERROR)
+    return home("Refresh times saved.")
 
 
 @app.post("/configure")
@@ -457,13 +470,14 @@ def scheduler():
         try:
             enabled = store.automatic_refresh_enabled()
             now = current_time(store, datetime) if enabled else None
+            times = store.automatic_refresh_times() if enabled else ()
         except (sqlite3.Error, ValueError):
             log.exception("Could not read the scheduler settings")
             time.sleep(SCHEDULER_POLL_INTERVAL_SECONDS)
             continue
         if now is not None:
             clock = now.strftime("%H:%M")
-            if clock in REFRESH_TIMES:
+            if clock in times:
                 run_refresh(now.strftime("%Y-%m-%d") + " " + clock)
         time.sleep(SCHEDULER_POLL_INTERVAL_SECONDS)
 

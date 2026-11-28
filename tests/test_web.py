@@ -77,6 +77,61 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(Store(store.path).automatic_refresh_enabled())
 
+    def test_schedule_can_be_changed_without_clearing_existing_data(self):
+        store = self.isolated_store()
+        store.set_many({"client_id": "client", "refresh_token": "saved"})
+        store.set_cached("liked_tracks_cache", "2026-01-01", ["track"])
+        response = self.client.post(
+            "/refresh-times", data={"csrf": web.csrf, "refresh_times": " 20:05\n8:15\n00:00\n8:15\n"},
+            environ_overrides=self.remote,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"00:00, 08:15, 20:05", response.data)
+        self.assertEqual(Store(store.path).automatic_refresh_times(), ["00:00", "08:15", "20:05"])
+        self.assertEqual(store.get("refresh_token"), "saved")
+        self.assertEqual(store.get_cached("liked_tracks_cache", "2026-01-01"), ["track"])
+        self.assertTrue(store.automatic_refresh_enabled())
+        self.assertEqual(self.client.post("/refresh-times", data={"refresh_times": "09:00"},
+                                          environ_overrides=self.remote).status_code, 403)
+        store.set_many({"automatic_refresh_enabled": False})
+        response = self.client.post(
+            "/refresh-times", data={"csrf": web.csrf, "refresh_times": "07:00"},
+            environ_overrides=self.remote,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(store.automatic_refresh_enabled())
+        self.assertEqual(Store(store.path).automatic_refresh_times(), ["07:00"])
+
+    def test_invalid_schedule_is_rejected_without_changing_existing_times(self):
+        store = self.isolated_store()
+        defaults = ["08:15", "12:15", "16:15", "20:15"]
+        self.assertEqual(store.automatic_refresh_times(), defaults)
+        for invalid in ("", "24:00", "12:60", "09:00\ninvalid", "12:3", "１２:３０"):
+            with self.subTest(invalid=invalid):
+                response = self.client.post(
+                    "/refresh-times", data={"csrf": web.csrf, "refresh_times": invalid},
+                    environ_overrides=self.remote,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(Store(store.path).automatic_refresh_times(), defaults)
+                self.assertIn(b"Enter at least one valid time", response.data)
+                self.assertIn(b'<details class="schedule-editor" open>', response.data)
+                self.assertIn(invalid.encode(), response.data)
+
+    def test_schedule_write_error_is_reported_without_losing_input(self):
+        store = self.isolated_store()
+        with patch.object(store, "set_many", side_effect=sqlite3.OperationalError("locked")), \
+             self.assertLogs("app.web", level="ERROR"):
+            response = self.client.post(
+                "/refresh-times", data={"csrf": web.csrf, "refresh_times": "09:30"},
+                environ_overrides=self.remote,
+            )
+        self.assertEqual(response.status_code, 500)
+        self.assertIn(b"Could not save refresh times", response.data)
+        self.assertIn(b'<details class="schedule-editor" open>', response.data)
+        self.assertIn(b"09:30", response.data)
+        self.assertEqual(store.automatic_refresh_times(), ["08:15", "12:15", "16:15", "20:15"])
+
     def test_request_overview_shows_daily_counts_and_first_quota_between_sections(self):
         store = self.isolated_store()
         started = datetime.now().astimezone()
@@ -597,6 +652,49 @@ class WebTests(unittest.TestCase):
             with self.assertRaises(StopIteration):
                 web.scheduler()
         self.assertEqual(run.call_args_list, [call("2026-01-15 08:15"), call("2026-01-16 08:15")])
+
+    def test_scheduler_uses_changed_times_without_restart(self):
+        store = self.isolated_store()
+        store.set_many({"timezone": "UTC"})
+        utc_times = [
+            datetime(2026, 1, 15, 8, 15, tzinfo=timezone.utc),
+            datetime(2026, 1, 15, 12, 15, tzinfo=timezone.utc),
+            datetime(2026, 1, 15, 9, 30, tzinfo=timezone.utc),
+        ]
+        iteration = 0
+
+        def change_schedule(key):
+            if key == "2026-01-15 08:15":
+                response = self.client.post(
+                    "/refresh-times", data={"csrf": web.csrf, "refresh_times": "09:30"},
+                    environ_overrides=self.remote,
+                )
+                self.assertEqual(response.status_code, 200)
+
+        def sleep(interval):
+            nonlocal iteration
+            iteration += 1
+            if iteration == len(utc_times):
+                raise StopIteration
+
+        with patch("app.web.datetime") as clock, \
+             patch("app.web.run_refresh", side_effect=change_schedule) as run, \
+             patch("app.web.time.sleep", side_effect=sleep):
+            clock.now.side_effect = lambda tz: utc_times[iteration]
+            with self.assertRaises(StopIteration):
+                web.scheduler()
+        self.assertEqual(run.call_args_list, [call("2026-01-15 08:15"), call("2026-01-15 09:30")])
+
+    def test_scheduler_logs_and_skips_invalid_stored_times(self):
+        store = self.isolated_store()
+        store.set_many({"automatic_refresh_times": ["24:00"]})
+        with patch("app.web.run_refresh") as run, \
+             patch("app.web.time.sleep", side_effect=StopIteration), \
+             self.assertLogs("app.web", level="ERROR") as logged:
+            with self.assertRaises(StopIteration):
+                web.scheduler()
+        run.assert_not_called()
+        self.assertIn("Could not read the scheduler settings", "\n".join(logged.output))
 
     def test_scheduler_skips_disabled_runs_and_responds_to_enabling(self):
         store = self.isolated_store()
