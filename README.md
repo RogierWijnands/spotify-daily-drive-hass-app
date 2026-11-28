@@ -7,8 +7,8 @@ A Home Assistant app that combines your favorite music, discoveries, artist rele
 1. In Home Assistant, go to **Settings → Apps → Install app → menu → Repositories**. Add `https://github.com/RogierWijnands/spotify-daily-drive-hass-app`.
 2. Install and start **Daily Drive**, then select **Open web UI**. Home Assistant builds the container locally.
 3. Create a [Spotify Developer app](https://developer.spotify.com/dashboard) with Web API access and register `http://127.0.0.1:8888/callback` as the exact redirect URI. Development Mode requires Spotify Premium for the app owner; no client secret is needed.
-4. Create a Spotify playlist and enter its URL and your client ID in the web UI. Optionally configure the market, timezone, source playlists and [shows](#news-and-podcast-shows), then save.
-5. Select **Start connection**, open the Spotify link and grant access. Copy the full redirect URL into the app, even if the browser shows an error. Do not share this URL: it contains an authorization code. Nothing needs to listen on port 8888.
+4. Create a Spotify playlist and enter its URL and your client ID under **Settings**. Optionally configure the market, timezone, source playlists and [shows](#news-and-podcast-shows), then save.
+5. Under **Settings**, select **Start connection**, open the Spotify link and grant access. Copy the full redirect URL into the app, even if the browser shows an error. Do not share this URL: it contains an authorization code. Nothing needs to listen on port 8888.
 6. Select **Refresh now** and check the history and app log.
 
 ## Settings and storage

@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from http import HTTPStatus
 
-from flask import Flask, abort, render_template_string, request
+from flask import Flask, abort, render_template, request
 from requests import RequestException
 from waitress import serve
 
@@ -161,113 +161,6 @@ def _selection_lines_with_links(lines, entry_index):
     return rendered
 
 
-PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Daily Drive</title><style>
-body {font: 16px system-ui; max-width: 760px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5}
-input, textarea {box-sizing: border-box; width: 100%; padding: .5rem; margin: .25rem 0 1rem}
-button {padding: .6rem 1rem; cursor: pointer} table {border-collapse: collapse; width: 100%}
-td, th {padding: .4rem; text-align: left; border-bottom: 1px solid #bbb}
-.notice {padding: .7rem; background: #e9f2ee; color: #17251d} code {overflow-wrap: anywhere}
-</style></head><body>
-<h1>Daily Drive</h1>
-{% if message %}<p class="notice">{{ message }}</p>{% endif %}
-{% if pending %}<p><strong>Warning:</strong> The outcome of a previous change is uncertain.
-Check the playlist. New changes are blocked until the contents can be confirmed automatically.</p>
-<form action="release" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
-<label><input style="width:auto" type="checkbox" name="confirm" required>
-I have checked the playlist and understand that the previous outcome remains unknown.</label>
-<button>Release block manually</button></form>{% endif %}
-<h2>Automatic refresh</h2>
-<p>Automatic refresh is {{ 'enabled' if automatic_refresh_enabled else 'disabled' }}.
-Scheduled times: {{ refresh_times | join(', ') }} ({{ timezone_display }}).</p>
-<form action="automatic-refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
-<input type="hidden" name="enabled" value="{{ 'off' if automatic_refresh_enabled else 'on' }}">
-<button>{{ 'Disable' if automatic_refresh_enabled else 'Enable' }} automatic refresh</button></form>
-<p>Changing this setting does not stop a refresh already in progress. Manual refresh remains available.</p>
-<h2>Settings</h2>
-<form action="configure" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
-<label>Spotify client ID <input name="client_id" required value="{{ client_id }}"></label>
-<label>Spotify market (two-letter country code)
-<input name="market" required maxlength="2" value="{{ market }}"></label>
-<label>Timezone (<code>system</code> or an IANA timezone, e.g. <code>Europe/Amsterdam</code>)
-<input name="timezone" required value="{{ timezone }}"></label>
-<p>Changing the market or timezone clears daily caches. Changing the timezone also clears
-request statistics because the boundaries of each day change.</p>
-<label>Daily Drive playlist URL <input name="target" required value="{{ target }}"></label>
-<label>Source playlists you own (one Spotify URL per line)
-<textarea name="sources" rows="4">{{ sources }}</textarea></label>
-<label>News shows (one Spotify show URL and episode count per line, separated by a comma)
-<textarea name="news_shows" rows="3" placeholder="https://open.spotify.com/show/SHOW_ID, 4">{{ news_shows }}</textarea></label>
-<label>Other podcast shows (one Spotify show URL and episode count per line, separated by a comma)
-<textarea name="podcast_shows" rows="3" placeholder="https://open.spotify.com/show/SHOW_ID, 1">{{ podcast_shows }}</textarea></label>
-{% if not news_shows and not podcast_shows %}<p>No shows configured: refreshes will contain only music.</p>{% endif %}
-<button>Save settings</button></form>
-<h2>Connect Spotify</h2>
-<p>Status: {{ 'connected' if connected else 'not connected' }}.
-First register <code>{{ redirect_uri }}</code> as a redirect URI in your Spotify app.</p>
-<form action="authorize" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Start connection</button></form>
-{% if auth_url %}
-<p><a href="{{ auth_url }}" target="_blank" rel="noopener noreferrer">Open Spotify and grant access</a>.
-An error page may appear after authorization; copy the full URL from the address bar and paste it below.</p>
-<form action="callback" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
-<label>Callback URL <input name="callback" required autocomplete="off"></label><button>Complete connection</button></form>
-{% endif %}
-<h2>Refresh</h2>
-<form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh now</button></form>
-<h2>History</h2><table><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr>
-{% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}{% if entry.status == succeeded_status and entry.error_count %} ({{ entry.error_count }} error{{ "s" if entry.error_count != 1 else "" }}){% endif %}</td><td>{{ entry.summary }}
-{% if entry.request_stats %}<br>Spotify API requests: {{ entry.request_stats.api_requests }};
-token requests: {{ entry.request_stats.token_requests }}; cache hits: {{ entry.request_stats.cache_hits }}.{% endif %}
-{% if entry.selection %}<details><summary>How this playlist was selected</summary><ul>
-{% for line in entry.selection %}
-<li{% if line.anchor %} id="{{ line.anchor }}"{% endif %}>{% for part in line.parts -%}
-{% if part.href -%}
-<a href="#{{ part.href }}">{{ part.text }}</a>
-{%- else -%}
-{{ part.text }}
-{%- endif -%}
-{%- endfor %}</li>
-{% endfor %}
-</ul></details>{% endif %}
-{% if entry.items_list %}<details><summary>Show playlist items</summary><ol>
-{% for item in entry.items_list %}<li>{{ item }}</li>{% endfor %}
-</ol></details>{% endif %}</td></tr>{% endfor %}
-</table>
-<p>Cache hits count reused cached sources or artist release track lists, not necessarily requests avoided.
-Token requests are counted separately from Spotify API requests.</p>
-<h2>Spotify requests today</h2>
-<p>{{ request_day }} ({{ timezone_display }}): {{ request_overview.requests }} request{{ "s" if request_overview.requests != 1 else "" }},
-{{ request_overview.errors }} error{{ "s" if request_overview.errors != 1 else "" }}. Includes Spotify API and token requests.
-Counts start when a request is started; errors include unsuccessful responses and network failures.
-Reload this page to update the overview.</p>
-{% if request_overview.first_quota %}
-<p>First observed quota or rate-limit error: request {{ request_overview.first_quota.number }} of the day,
-request {{ request_overview.first_quota.category_number }} for
-{{ request_overview.first_quota.category }}, started at {{ request_overview.first_quota.time }}.
-Request details: {{ request_overview.first_quota.detail }}.</p>
-{% else %}<p>No quota or rate-limit error recorded today.</p>{% endif %}
-{% if request_overview.categories %}
-<table><tr><th>Category</th><th>Requests</th><th>Errors</th></tr>
-{% for category in request_overview.categories %}
-<tr><td>{{ category.category }}</td><td>{{ category.requests }}</td><td>{{ category.errors }}</td></tr>
-{% endfor %}</table>
-{% else %}<p>No requests recorded today.</p>{% endif %}
-<p>These are app request counts, not Spotify's rolling quota or remaining allowance.</p>
-<p>Artist release and artist release track requests are only needed when the daily discovery cache is filled;
-later refreshes reuse it.</p>
-<h2>Storage</h2>
-<p>SQLite database: {{ storage_bytes }} bytes ({{ "%.2f" | format(storage_mib) }} MiB).
-Temporary SQLite journal files are not included.</p>
-<p>Clear cached tracks and artists, refresh history, request statistics and used episodes. Settings and the Spotify
-connection are kept. This cannot be undone and does not change the Spotify playlist.</p>
-<form action="clear-storage" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
-<label><input style="width:auto" type="checkbox" name="confirm" required>
-I understand that cached data and history will be deleted.</label>
-<button>Clear stored data</button></form>
-</body></html>"""
-
-
 @app.before_request
 def ingress_only():
     # Only accept Home Assistant ingress requests; POST forms also need the CSRF token.
@@ -327,10 +220,11 @@ def home(message=None, status=HTTPStatus.OK):
             request_overview["first_quota"]["started"]
         ).strftime("%H:%M:%S %z")
     storage_bytes = os.path.getsize(store.path)
-    return render_template_string(
-        PAGE,
+    return render_template(
+        "index.html",
         csrf=csrf,
         message=message,
+        message_is_error=status >= HTTPStatus.BAD_REQUEST,
         auth_url=auth_url,
         redirect_uri=REDIRECT_URI,
         client_id=store.get("client_id", ""),

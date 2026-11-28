@@ -87,9 +87,10 @@ class WebTests(unittest.TestCase):
 
         response = self.client.get("/", environ_overrides=self.remote)
         html = response.data.decode()
-        self.assertLess(html.index("<h2>History</h2>"), html.index("<h2>Spotify requests today</h2>"))
-        self.assertLess(html.index("<h2>Spotify requests today</h2>"), html.index("<h2>Storage</h2>"))
-        self.assertIn("3 requests,\n1 error", html)
+        self.assertLess(html.index('id="history-heading"'), html.index('id="requests-heading"'))
+        self.assertLess(html.index('id="requests-heading"'), html.index("<h2>Storage</h2>"))
+        self.assertIn("<span>Requests</span><strong>3</strong>", html)
+        self.assertIn("<span>Errors</span><strong>1</strong>", html)
         self.assertIn("<td>Liked tracks</td><td>1</td><td>0</td>", html)
         self.assertIn("<td>Artist releases</td><td>2</td><td>1</td>", html)
         self.assertIn("request 2 of the day", html)
@@ -102,6 +103,37 @@ class WebTests(unittest.TestCase):
         response = self.client.get("/", environ_overrides=self.remote)
         self.assertIn(b"No requests recorded today.", response.data)
         self.assertIn(b"No quota or rate-limit error recorded today.", response.data)
+
+    def test_settings_disclosure_keeps_setup_and_connection_flow_accessible(self):
+        store = self.isolated_store()
+        page = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b'<details class="panel disclosure settings" open>', page.data)
+        self.assertIn(b"No refreshes yet.", page.data)
+
+        store.set_many({"client_id": "a" * 32, "refresh_token": "saved", "playlist_id": "0" * 22})
+        page = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b'<details class="panel disclosure settings" >', page.data)
+        self.assertIn(b'<details class="panel disclosure storage">', page.data)
+        self.assertEqual(store.get("refresh_token"), "saved")
+
+        page = self.client.post("/configure", data={"csrf": web.csrf, "client_id": "invalid"},
+                                environ_overrides=self.remote)
+        self.assertEqual(page.status_code, 400)
+        self.assertIn(b'<details class="panel disclosure settings" open>', page.data)
+        with patch.dict(web.oauth, {"url": "https://accounts.spotify.com/authorize"}, clear=True):
+            page = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b'<details class="panel disclosure settings" open>', page.data)
+        self.assertIn(b"Complete connection", page.data)
+
+    def test_stylesheet_uses_ingress_prefix_and_requires_ingress(self):
+        page = self.client.get("/", environ_overrides={
+            **self.remote, "SCRIPT_NAME": "/api/hassio_ingress/example",
+        })
+        self.assertIn(b'href="/api/hassio_ingress/example/static/style.css"', page.data)
+        self.assertEqual(self.client.get("/static/style.css").status_code, 403)
+        stylesheet = self.client.get("/static/style.css", environ_overrides=self.remote)
+        self.addCleanup(stylesheet.close)
+        self.assertEqual(stylesheet.status_code, 200)
 
     def test_request_overview_uses_artist_release_name_for_existing_counts(self):
         store = self.isolated_store()
@@ -138,12 +170,14 @@ class WebTests(unittest.TestCase):
         store = self.isolated_store()
         store.finish(store.start(), "failed", "old entry")
         entry_id = store.start()
-        store.finish(entry_id, "succeeded", "new entry")
+        store.finish(entry_id, "succeeded", "new entry\nSelection:\nLiked tracks: cached.")
         store.save_request_stats(entry_id, RefreshRequestStats(12, 1, 3))
         store.start()
 
         html = self.client.get("/", environ_overrides=self.remote).data.decode()
         self.assertIn("Spotify API requests: 12;\ntoken requests: 1; cache hits: 3.", html)
+        self.assertLess(html.index("Spotify API requests: 12;"),
+                        html.index("<details><summary>How this playlist was selected</summary>"))
         self.assertEqual(html.count("Spotify API requests:"), 1)
         self.assertIn("old entry", html)
 

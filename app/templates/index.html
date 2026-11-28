@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Daily Drive</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="shell">
+  <header class="page-header">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32" fill="none"><path d="M7 11.5c5.8-2.7 12.6-2.2 18 1.1M8.8 16.3c4.6-2 10.1-1.6 14.4.9M10.5 21c3.5-1.3 7.4-1 10.7.7" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </div>
+      <div><p class="eyebrow">YOUR LISTENING, CURATED</p><h1>Daily Drive</h1></div>
+    </div>
+    <span class="connection {{ 'connected' if connected else 'disconnected' }}">
+      <span class="status-dot" aria-hidden="true"></span>Spotify {{ 'connected' if connected else 'not connected' }}
+    </span>
+  </header>
+
+  {% if message %}<p class="notice{% if message_is_error %} notice-error{% endif %}" role="{{ 'alert' if message_is_error else 'status' }}">{{ message }}</p>{% endif %}
+  {% if pending %}
+  <section class="warning-panel" aria-label="Uncertain playlist change">
+    <p class="eyebrow">ACTION REQUIRED</p>
+    <h2>Previous change needs attention</h2>
+    <p><strong>Warning:</strong> The outcome of a previous change is uncertain. Check the playlist.
+      New changes are blocked until the contents can be confirmed automatically.</p>
+    <form action="release" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <label class="checkbox"><input type="checkbox" name="confirm" required>
+        <span>I have checked the playlist and understand that the previous outcome remains unknown.</span></label>
+      <button class="button button-danger" type="submit">Release block manually</button>
+    </form>
+  </section>
+  {% endif %}
+
+  <section class="control-panel" aria-label="Refresh controls">
+    <div class="control-main">
+      <p class="eyebrow">YOUR DAILY MIX</p>
+      <h2>Made for your day.</h2>
+      <p>Music, discoveries and the latest episodes, all in one playlist.</p>
+      <form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="button button-primary" type="submit"><span aria-hidden="true">↻</span> Refresh now</button>
+      </form>
+    </div>
+    <div class="schedule">
+      <div class="schedule-heading">
+        <div><p class="eyebrow">SCHEDULE</p><h2>Automatic refresh</h2></div>
+        <span class="schedule-status {{ 'on' if automatic_refresh_enabled else 'off' }}">
+          <span class="status-dot" aria-hidden="true"></span>{{ 'On' if automatic_refresh_enabled else 'Off' }}
+        </span>
+      </div>
+      <p>Automatic refresh is {{ 'enabled' if automatic_refresh_enabled else 'disabled' }}.</p>
+      <p class="schedule-times">{{ refresh_times | join(', ') }}</p>
+      <p class="subtle">{{ timezone_display }}</p>
+      <form action="automatic-refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="enabled" value="{{ 'off' if automatic_refresh_enabled else 'on' }}">
+        <button class="button button-outline" type="submit">{{ 'Disable' if automatic_refresh_enabled else 'Enable' }} automatic refresh</button>
+      </form>
+      <p class="subtle schedule-note">Changing this setting does not stop a refresh already in progress. Manual refresh remains available.</p>
+    </div>
+  </section>
+
+  <details class="panel disclosure settings" {% if not connected or auth_url or (message and request.endpoint in ('configure', 'authorize', 'callback')) %}open{% endif %}>
+    <summary class="panel-summary">
+      <div><span class="eyebrow">YOUR PREFERENCES</span><h2>Settings</h2>
+        <span class="summary-description">Spotify, playlists, shows and region</span></div>
+      <span class="disclosure-icon" aria-hidden="true"></span>
+    </summary>
+    <div class="panel-content">
+      <form action="configure" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <div class="field-grid">
+          <label>Spotify client ID<input name="client_id" required value="{{ client_id }}"></label>
+          <label>Daily Drive playlist URL<input name="target" required value="{{ target }}"></label>
+          <label>Spotify market <span class="field-hint">(two-letter country code)</span>
+            <input name="market" required maxlength="2" value="{{ market }}"></label>
+          <label>Timezone <span class="field-hint">(<code>system</code> or IANA timezone)</span>
+            <input name="timezone" required value="{{ timezone }}" placeholder="Europe/Amsterdam"></label>
+        </div>
+        <p class="help">Changing the market or timezone clears daily caches. Changing the timezone also clears
+          request statistics because the boundaries of each day change.</p>
+        <label>Source playlists you own <span class="field-hint">(one Spotify URL per line)</span>
+          <textarea name="sources" rows="3">{{ sources }}</textarea></label>
+        <div class="field-grid">
+          <label>News shows <span class="field-hint">(show URL and episode count per line)</span>
+            <textarea name="news_shows" rows="3" placeholder="https://open.spotify.com/show/SHOW_ID, 4">{{ news_shows }}</textarea></label>
+          <label>Other podcast shows <span class="field-hint">(show URL and episode count per line)</span>
+            <textarea name="podcast_shows" rows="3" placeholder="https://open.spotify.com/show/SHOW_ID, 1">{{ podcast_shows }}</textarea></label>
+        </div>
+        {% if not news_shows and not podcast_shows %}<p class="help">No shows configured: refreshes will contain only music.</p>{% endif %}
+        <button class="button button-dark" type="submit">Save settings</button>
+      </form>
+      <div class="connection-settings">
+        <div><p class="eyebrow">ACCOUNT</p><h3>Connect Spotify</h3>
+          <p class="help">Status: {{ 'connected' if connected else 'not connected' }}.
+            First register <code>{{ redirect_uri }}</code> as a redirect URI in your Spotify app.</p></div>
+        <form action="authorize" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <button class="button button-secondary" type="submit">Start connection</button></form>
+      </div>
+      {% if auth_url %}
+      <div class="auth-step">
+        <p><a href="{{ auth_url }}" target="_blank" rel="noopener noreferrer">Open Spotify and grant access</a>.
+          An error page may appear after authorization; copy the full URL from the address bar and paste it below.</p>
+        <form action="callback" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <label>Callback URL<input name="callback" required autocomplete="off"></label>
+          <button class="button button-dark" type="submit">Complete connection</button></form>
+      </div>
+      {% endif %}
+    </div>
+  </details>
+
+  <section class="panel" aria-labelledby="history-heading">
+    <div class="section-heading">
+      <div><p class="eyebrow">YOUR RECENT ACTIVITY</p><h2 id="history-heading">History</h2>
+        <p class="section-description">A closer look at each refresh.</p></div>
+    </div>
+    {% if history %}
+    <div class="table-wrap"><table class="history-table">
+      <thead><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr></thead>
+      <tbody>{% for entry in history %}<tr class="history-{{ entry.status }}"><td>{{ entry.started }}</td><td>{{ entry.status }}{% if entry.status == succeeded_status and entry.error_count %} ({{ entry.error_count }} error{{ "s" if entry.error_count != 1 else "" }}){% endif %}</td><td>{{ entry.summary }}
+      {% if entry.request_stats %}<br>Spotify API requests: {{ entry.request_stats.api_requests }};
+token requests: {{ entry.request_stats.token_requests }}; cache hits: {{ entry.request_stats.cache_hits }}.{% endif %}
+      {% if entry.selection %}<details><summary>How this playlist was selected</summary><ul>
+      {% for line in entry.selection %}<li{% if line.anchor %} id="{{ line.anchor }}"{% endif %}>{% for part in line.parts -%}
+      {% if part.href -%}<a href="#{{ part.href }}">{{ part.text }}</a>{%- else -%}{{ part.text }}{%- endif -%}
+      {%- endfor %}</li>{% endfor %}
+      </ul></details>{% endif %}
+      {% if entry.items_list %}<details><summary>Show playlist items</summary><ol>
+      {% for item in entry.items_list %}<li>{{ item }}</li>{% endfor %}
+      </ol></details>{% endif %}</td></tr>{% endfor %}</tbody>
+    </table></div>
+    <p class="panel-footnote">Cache hits count reused cached sources or artist release track lists, not necessarily requests avoided.
+      Token requests are counted separately from Spotify API requests.</p>
+    {% else %}<p class="empty-state">No refreshes yet. Your history will appear here after your first refresh.</p>{% endif %}
+  </section>
+
+  <section class="panel" aria-labelledby="requests-heading">
+    <div class="section-heading">
+      <div><p class="eyebrow">ACTIVITY OVERVIEW</p><h2 id="requests-heading">Spotify requests today</h2>
+        <p class="section-description">{{ request_day }} · {{ timezone_display }}</p></div>
+    </div>
+    <div class="request-overview">
+      <div class="metric"><span>Requests</span><strong>{{ request_overview.requests }}</strong></div>
+      <div class="metric"><span>Errors</span><strong>{{ request_overview.errors }}</strong></div>
+      <p class="overview-copy">Includes Spotify API and token requests.
+        Counts start when a request is started; errors include unsuccessful responses, network failures and invalid JSON.
+        Reload this page to update the overview.</p>
+    </div>
+    <div class="panel-content request-content">
+      {% if request_overview.first_quota %}
+      <p class="quota">First observed quota or rate-limit error: request {{ request_overview.first_quota.number }} of the day,
+        request {{ request_overview.first_quota.category_number }} for
+{{ request_overview.first_quota.category }}, started at {{ request_overview.first_quota.time }}.
+        Request details: {{ request_overview.first_quota.detail }}.</p>
+      {% else %}<p class="help">No quota or rate-limit error recorded today.</p>{% endif %}
+      {% if request_overview.categories %}
+      <details class="inner-disclosure"><summary>Requests by category</summary>
+        <div class="table-wrap"><table class="category-table"><thead><tr><th>Category</th><th>Requests</th><th>Errors</th></tr></thead>
+        <tbody>{% for category in request_overview.categories %}
+        <tr><td>{{ category.category }}</td><td>{{ category.requests }}</td><td>{{ category.errors }}</td></tr>
+        {% endfor %}</tbody></table></div>
+      </details>
+      {% else %}<p class="help">No requests recorded today.</p>{% endif %}
+      <p class="help">These are app request counts, not Spotify's rolling quota or remaining allowance.
+        Artist release and artist release track requests are only needed when the daily discovery cache is filled;
+        later refreshes reuse it.</p>
+    </div>
+  </section>
+
+  <details class="panel disclosure storage">
+    <summary class="panel-summary">
+      <div><span class="eyebrow">DATA &amp; PRIVACY</span><h2>Storage</h2>
+        <span class="summary-description">Database details and stored data</span></div>
+      <span class="disclosure-icon" aria-hidden="true"></span>
+    </summary>
+    <div class="panel-content">
+      <p>SQLite database: {{ storage_bytes }} bytes ({{ "%.2f" | format(storage_mib) }} MiB).
+        Temporary SQLite journal files are not included.</p>
+      <p class="help">Clear cached tracks and artists, refresh history, request statistics and used episodes. Settings and the Spotify
+        connection are kept. This cannot be undone and does not change the Spotify playlist.</p>
+      <form action="clear-storage" method="post"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <label class="checkbox"><input type="checkbox" name="confirm" required>
+          <span>I understand that cached data and history will be deleted.</span></label>
+        <button class="button button-danger" type="submit">Clear stored data</button>
+      </form>
+    </div>
+  </details>
+  <footer>Daily Drive <span aria-hidden="true">·</span> Made for Home Assistant</footer>
+</main>
+</body>
+</html>
