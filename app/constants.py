@@ -18,7 +18,7 @@ MAX_TRACKS_PER_CANDIDATE_GROUP = 80
 RESERVED_FAVORITE_GROUP_COUNT = 2
 MAX_RELEASES_PER_ARTIST_TEXT = "two"
 ARTIST_DISCOVERY_RELEASE_GROUPS = "album,single,appears_on"
-COLLABORATOR_RELEASE_GROUPS = "album,single"
+COLLABORATOR_ARTIST_RELEASE_GROUPS = "album,single"
 
 MILLISECONDS_PER_SECOND = 1000
 SECONDS_PER_MINUTE = 60
@@ -71,7 +71,9 @@ REQUEST_CATEGORY_LIKED_TRACKS = "Liked tracks"
 REQUEST_CATEGORY_FOLLOWED_ARTISTS = "Followed artists"
 REQUEST_CATEGORY_SHOW_EPISODES = "Show episodes"
 REQUEST_CATEGORY_ARTIST_RELEASES = "Artist releases"
-REQUEST_CATEGORY_RELEASE_TRACKS = "Release tracks"
+# Preserve the stored key so today's existing request counts remain intact.
+REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY = "Release tracks"
+REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS = "Artist release tracks"
 REQUEST_CATEGORY_PLAYLIST_READS = "Playlist reads"
 REQUEST_CATEGORY_PLAYLIST_UPDATES = "Playlist updates"
 REQUEST_CATEGORY_OTHER = "Other Spotify API requests"
@@ -92,6 +94,7 @@ CACHE_KEY_SUFFIX = "_cache"
 SHOW_EPISODE_CACHE_PREFIX = "show_episodes_"
 FOLLOWED_ARTISTS_CACHE_KEY = "followed_artists_cache"
 LIKED_TRACKS_CACHE_KEY = "liked_tracks_cache"
+DISCOVERY_TRACKS_CACHE_KEY = "discovery_tracks_cache"
 RECENT_TRACKS_CACHE_KEY = "recently_played_tracks_cache"
 TOP_ARTISTS_TIME_RANGE_CACHE_KEY = "top_artists_time_range_cache"
 
@@ -102,7 +105,7 @@ SOURCE_RECENT_TRACKS = "recent tracks"
 SOURCE_LIKED_TRACKS = "liked tracks"
 SOURCE_TOP_ARTISTS = "top artists"
 SOURCE_FOLLOWED_ARTISTS = "followed artists"
-ARTIST_RELEASE_SOURCE = "release"
+ARTIST_RELEASE_SOURCE = "artist release"
 SOURCE_PLAYLISTS = "playlist"
 MUSIC_GROUP_SOURCES = {
     "current and recent": (
@@ -119,6 +122,7 @@ MUSIC_GROUP_SOURCES = {
 MUSIC_GROUP_NAMES = tuple(MUSIC_GROUP_SOURCES)
 
 SOURCE_WARNING_PREFIX = "Source warning: "
+SOURCE_ERROR_PREFIX = "Source error: "
 SOURCE_SKIP_PREFIX = "Skipping "
 SOURCE_CACHED_PREFIX = "Using cached "
 SOURCE_PARTIAL_PREFIX = "Using partial "
@@ -130,13 +134,19 @@ SHOW_HISTORY_SEPARATOR = " show "
 EMPTY_GROUP_HISTORY_MARKER = ": 0"
 SHOW_SOURCE_PREFIX = "show:"
 SHOW_EPISODE_FETCH_FAILURE_PREFIX = "Failed to fetch remaining episodes for show "
-SKIP_ARTIST_RELEASES_PREFIX = "Skipping releases for artist "
-COMBINED_ARTIST_RELEASE_LOOKUP_PREFIX = "Combined release lookup for artist "
-SKIP_RELEASE_POSITION_PREFIX = "Skipping release at position "
+SHOW_EPISODE_SHORTFALL_PREFIX = "Show "
+SHOW_EPISODE_SHORTFALL_SUFFIX = " requested playable episodes"
+SKIP_ARTIST_RELEASES_PREFIX = "Skipping artist releases for artist "
+COMBINED_ARTIST_RELEASE_LOOKUP_PREFIX = "Combined artist release lookup for artist "
+SKIP_ARTIST_RELEASE_POSITION_PREFIX = "Skipping artist release at position "
 ARTIST_RELEASE_ERROR_PREFIXES = (
     SKIP_ARTIST_RELEASES_PREFIX,
     COMBINED_ARTIST_RELEASE_LOOKUP_PREFIX,
-    SKIP_RELEASE_POSITION_PREFIX,
+    SKIP_ARTIST_RELEASE_POSITION_PREFIX,
+    # Older history and cached warnings must keep their error links.
+    "Skipping releases for artist ",
+    "Combined release lookup for artist ",
+    "Skipping release at position ",
 )
 PLAYLIST_SOURCE_ERROR_PREFIXES = tuple(
     prefix + SOURCE_PLAYLISTS + " "
@@ -147,14 +157,14 @@ ZERO_FOLLOWED_ARTISTS_ERROR = "no artists available because a Spotify request fa
 ZERO_SHOW_EPISODES_ERROR = "0 episodes selected because Spotify requests failed"
 EMPTY_ARTIST_POOL_ERROR = "artist source errors prevented discovery"
 EMPTY_GROUP_ERROR = "no candidates because source retrieval failed"
-ZERO_RELEASE_LISTS_ERROR = "0 retrieved because artist release requests failed"
+ZERO_ARTIST_RELEASE_LISTS_ERROR = "0 retrieved because artist release requests failed"
 HISTORY_ERROR_MARKERS = (
     ZERO_FETCH_RESULTS,
     ZERO_FOLLOWED_ARTISTS_ERROR,
     ZERO_SHOW_EPISODES_ERROR,
     EMPTY_ARTIST_POOL_ERROR,
     EMPTY_GROUP_ERROR,
-    ZERO_RELEASE_LISTS_ERROR,
+    ZERO_ARTIST_RELEASE_LISTS_ERROR,
 )
 
 SELECTION_DETAIL_SEPARATOR = "\nSelection:\n"

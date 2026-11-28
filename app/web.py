@@ -15,21 +15,22 @@ from .constants import (
     ARTIST_RELEASE_ERROR_PREFIXES, ARTIST_RELEASE_SOURCE, AUTOMATIC_REFRESH_ENABLED_KEY, BYTES_PER_MEBIBYTE,
     DEFAULT_SPOTIFY_MARKET, DEFAULT_TIMEZONE, EMPTY_ARTIST_POOL_ERROR, EMPTY_GROUP_ERROR,
     EMPTY_GROUP_HISTORY_MARKER, HISTORY_ERROR_MARKERS,
-    HISTORY_LIKED_TRACKS_LABEL, HISTORY_RECENT_TRACKS_LABEL, HISTORY_TOP_ARTISTS_PREFIX,
+    HISTORY_LIKED_TRACKS_LABEL, HISTORY_RECENT_TRACKS_LABEL, HISTORY_STATUS_SUCCEEDED, HISTORY_TOP_ARTISTS_PREFIX,
     HISTORY_TOP_TRACKS_PREFIX, HOME_ASSISTANT_INGRESS_IP, ITEMS_DETAIL_SEPARATOR,
     LONG_TERM, MAX_REQUEST_BODY_BYTES, MEDIUM_TERM, MISSING_SPOTIFY_REFRESH_TOKEN_ERROR,
     MUSIC_GROUP_SOURCES, OAUTH_STATE_TTL_SECONDS, PREVIOUS_CHANGE_OUTCOME_UNKNOWN_MESSAGE,
     SCHEDULER_POLL_INTERVAL_SECONDS, SECURE_TOKEN_ENTROPY_BYTES,
     SELECTION_DETAIL_SEPARATOR, SHOW_EPISODE_FETCH_FAILURE_PREFIX, SHOW_HISTORY_SEPARATOR,
-    SHOW_SOURCE_PREFIX, SOURCE_CACHED_PREFIX, SOURCE_FOLLOWED_ARTISTS, SOURCE_LIKED_TRACKS,
+    SHOW_SOURCE_PREFIX, SOURCE_CACHED_PREFIX, SOURCE_ERROR_PREFIX, SOURCE_FOLLOWED_ARTISTS, SOURCE_LIKED_TRACKS,
     SOURCE_LONG_TERM_TOP_TRACKS, SOURCE_MEDIUM_TERM_TOP_TRACKS, SOURCE_PARTIAL_PREFIX,
     SOURCE_PLAYLISTS, SOURCE_RECENT_TRACKS, SOURCE_SHORT_TERM_TOP_TRACKS, SOURCE_SKIP_PREFIX,
     SOURCE_TOP_ARTISTS, SOURCE_WARNING_PREFIX, SPOTIFY_CLIENT_ID_LENGTH, SHORT_TERM,
     TOP_TIME_RANGE_LABELS, TRACKS_DETAIL_SEPARATOR, WEB_REFRESH_ALREADY_RUNNING_MESSAGE,
-    ZERO_FETCH_RESULTS, ZERO_FOLLOWED_ARTISTS_ERROR, ZERO_RELEASE_LISTS_ERROR,
+    ZERO_ARTIST_RELEASE_LISTS_ERROR, ZERO_FETCH_RESULTS, ZERO_FOLLOWED_ARTISTS_ERROR,
     ZERO_SHOW_EPISODES_ERROR,
 )
 from .refresh import Refresh
+from .selection import is_source_error
 from .shows import format_show_lines, parse_show_lines, validate_shows
 from .spotify import (
     REDIRECT_URI, SpotifyError, authorization, callback_code, playlist_id, token_request,
@@ -58,7 +59,7 @@ GROUP_ERROR_SOURCES = MUSIC_GROUP_SOURCES
 
 
 def _warning_matches_source(warning, source):
-    detail = warning.removeprefix(SOURCE_WARNING_PREFIX)
+    detail = warning.removeprefix(SOURCE_WARNING_PREFIX).removeprefix(SOURCE_ERROR_PREFIX)
     if source == ARTIST_RELEASE_SOURCE:
         return detail.startswith(ARTIST_RELEASE_ERROR_PREFIXES)
     if source == SOURCE_PLAYLISTS:
@@ -110,7 +111,7 @@ def _error_sources_for_marker(line, marker, start):
             if line.rfind(f"{group}{EMPTY_GROUP_HISTORY_MARKER}", 0, start) >= 0
         ]
         return max(matched, key=lambda match: match[0])[1] if matched else []
-    if marker == ZERO_RELEASE_LISTS_ERROR:
+    if marker == ZERO_ARTIST_RELEASE_LISTS_ERROR:
         return [ARTIST_RELEASE_SOURCE]
     return []
 
@@ -120,7 +121,7 @@ def _selection_lines_with_links(lines, entry_index):
     warning_ids = {
         index: f"history-{entry_index}-error-{index}"
         for index, line in enumerate(lines)
-        if line.startswith(SOURCE_WARNING_PREFIX)
+        if line.startswith((SOURCE_WARNING_PREFIX, SOURCE_ERROR_PREFIX))
     }
     warnings = [(index, lines[index]) for index in warning_ids]
     rendered = []
@@ -211,7 +212,9 @@ An error page may appear after authorization; copy the full URL from the address
 <h2>Refresh</h2>
 <form action="refresh" method="post"><input type="hidden" name="csrf" value="{{ csrf }}"><button>Refresh now</button></form>
 <h2>History</h2><table><tr><th>Started (UTC)</th><th>Status</th><th>Details</th></tr>
-{% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}</td><td>{{ entry.summary }}
+{% for entry in history %}<tr><td>{{ entry.started }}</td><td>{{ entry.status }}{% if entry.status == succeeded_status and entry.error_count %} ({{ entry.error_count }} error{{ "s" if entry.error_count != 1 else "" }}){% endif %}</td><td>{{ entry.summary }}
+{% if entry.request_stats %}<br>Spotify API requests: {{ entry.request_stats.api_requests }};
+token requests: {{ entry.request_stats.token_requests }}; cache hits: {{ entry.request_stats.cache_hits }}.{% endif %}
 {% if entry.selection %}<details><summary>How this playlist was selected</summary><ul>
 {% for line in entry.selection %}
 <li{% if line.anchor %} id="{{ line.anchor }}"{% endif %}>{% for part in line.parts -%}
@@ -227,6 +230,8 @@ An error page may appear after authorization; copy the full URL from the address
 {% for item in entry.items_list %}<li>{{ item }}</li>{% endfor %}
 </ol></details>{% endif %}</td></tr>{% endfor %}
 </table>
+<p>Cache hits count reused cached sources or artist release track lists, not necessarily requests avoided.
+Token requests are counted separately from Spotify API requests.</p>
 <h2>Spotify requests today</h2>
 <p>{{ request_day }} ({{ timezone_display }}): {{ request_overview.requests }} request{{ "s" if request_overview.requests != 1 else "" }},
 {{ request_overview.errors }} error{{ "s" if request_overview.errors != 1 else "" }}. Includes Spotify API and token requests.
@@ -245,6 +250,8 @@ Request details: {{ request_overview.first_quota.detail }}.</p>
 {% endfor %}</table>
 {% else %}<p>No requests recorded today.</p>{% endif %}
 <p>These are app request counts, not Spotify's rolling quota or remaining allowance.</p>
+<p>Artist release and artist release track requests are only needed when the daily discovery cache is filled;
+later refreshes reuse it.</p>
 <h2>Storage</h2>
 <p>SQLite database: {{ storage_bytes }} bytes ({{ "%.2f" | format(storage_mib) }} MiB).
 Temporary SQLite journal files are not included.</p>
@@ -284,10 +291,27 @@ def home(message=None, status=HTTPStatus.OK):
         if not separator:
             summary, separator, items = entry["detail"].partition(TRACKS_DETAIL_SEPARATOR)
         summary, selection_separator, selection = summary.partition(SELECTION_DETAIL_SEPARATOR)
+        selection_lines = selection.splitlines() if selection_separator else []
         entry["summary"] = summary
-        entry["selection"] = (_selection_lines_with_links(selection.splitlines(), entry_index)
-                              if selection_separator else [])
+
+        # Older history used "Source warning" for errors too; keep its stored text unchanged.
+        error_count = 0
+        display_lines = []
+        for line in selection_lines:
+            if line.startswith((SOURCE_WARNING_PREFIX, SOURCE_ERROR_PREFIX)):
+                detail = line.removeprefix(SOURCE_WARNING_PREFIX).removeprefix(SOURCE_ERROR_PREFIX)
+                if is_source_error(detail):
+                    error_count += 1
+                    line = SOURCE_ERROR_PREFIX + detail
+            display_lines.append(line)
+        entry["error_count"] = error_count
+        entry["selection"] = _selection_lines_with_links(display_lines, entry_index)
         entry["items_list"] = items.splitlines() if separator else []
+        entry["request_stats"] = (
+            {key: entry[key] for key in ("api_requests", "token_requests", "cache_hits")}
+            if all(entry.get(key) is not None for key in ("api_requests", "token_requests", "cache_hits"))
+            else None
+        )
 
     now = current_time(store, datetime)
     timezone = store.get("timezone", DEFAULT_TIMEZONE)
@@ -314,6 +338,7 @@ def home(message=None, status=HTTPStatus.OK):
         connected=bool(store.get("refresh_token")),
         pending=store.pending(),
         history=history,
+        succeeded_status=HISTORY_STATUS_SUCCEEDED,
         automatic_refresh_enabled=store.automatic_refresh_enabled(),
         request_day=request_day,
         request_overview=request_overview,

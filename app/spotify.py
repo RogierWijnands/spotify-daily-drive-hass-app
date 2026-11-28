@@ -12,19 +12,21 @@ import requests
 
 from .constants import (
     API_REQUEST_TIMEOUT_SECONDS, ARTIST_DISCOVERY_RELEASE_GROUPS,
-    CACHE_KEY_SUFFIX, COLLABORATOR_RELEASE_GROUPS, DEFAULT_SPOTIFY_MARKET, FOLLOWED_ARTISTS_CACHE_KEY,
+    CACHE_KEY_SUFFIX, COLLABORATOR_ARTIST_RELEASE_GROUPS, DEFAULT_SPOTIFY_MARKET, FOLLOWED_ARTISTS_CACHE_KEY,
     MAX_FOLLOWED_ARTISTS_REQUESTS_PER_DAY,
     MAX_LIKED_TRACK_PAGES_PER_REFRESH, MAX_PAGINATED_ITEMS, PKCE_VERIFIER_ENTROPY_BYTES,
     REQUEST_CATEGORY_ARTIST_RELEASES, REQUEST_CATEGORY_FOLLOWED_ARTISTS,
     REQUEST_CATEGORY_LIKED_TRACKS, REQUEST_CATEGORY_OTHER, REQUEST_CATEGORY_PLAYLIST_READS,
     REQUEST_CATEGORY_PLAYLIST_UPDATES, REQUEST_CATEGORY_RECENT_TRACKS,
-    REQUEST_CATEGORY_RELEASE_TRACKS, REQUEST_CATEGORY_SHOW_EPISODES, REQUEST_CATEGORY_TOKEN,
+    REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY, REQUEST_CATEGORY_SHOW_EPISODES, REQUEST_CATEGORY_TOKEN,
     REQUEST_CATEGORY_TOP_ARTISTS, REQUEST_CATEGORY_TOP_TRACKS, SECURE_TOKEN_ENTROPY_BYTES,
     SOURCE_FOLLOWED_ARTISTS, SPOTIFY_FOLLOWED_ARTISTS_PATH, SPOTIFY_ID_LENGTH,
     SPOTIFY_LIKED_TRACKS_PATH, SPOTIFY_MARKET_CODE_LENGTH, SPOTIFY_PAGE_SIZE,
     SPOTIFY_PLAYLIST_ITEMS_PATH, SPOTIFY_QUOTA_EXCEEDED_REASON, SPOTIFY_RECENT_TRACKS_PATH,
-    SPOTIFY_TOP_ITEMS_PATH, TOKEN_REQUEST_TIMEOUT_SECONDS, TOP_TIME_RANGE_LABELS, ZERO_FETCH_RESULTS,
+    SPOTIFY_TOP_ITEMS_PATH, TOKEN_REQUEST_TIMEOUT_SECONDS, TOP_ARTISTS_TIME_RANGE_CACHE_KEY,
+    TOP_TIME_RANGE_LABELS, ZERO_FETCH_RESULTS,
 )
+from .request_stats import record_cache_hit, record_request
 from .timezones import current_time
 
 REDIRECT_URI = "http://127.0.0.1:8888/callback"
@@ -86,7 +88,7 @@ def _request_category(method, path, params):
         if parts[0] == "artists" and parts[2] == "albums":
             return REQUEST_CATEGORY_ARTIST_RELEASES
         if parts[0] == "albums" and parts[2] == "tracks":
-            return REQUEST_CATEGORY_RELEASE_TRACKS
+            return REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY
         if parts[0] == "playlists" and parts[2] == "items":
             return REQUEST_CATEGORY_PLAYLIST_READS if method == "GET" else REQUEST_CATEGORY_PLAYLIST_UPDATES
 
@@ -97,7 +99,7 @@ def _request_detail(method, path, params, category):
     labels = {
         REQUEST_CATEGORY_SHOW_EPISODES: "show",
         REQUEST_CATEGORY_ARTIST_RELEASES: "artist",
-        REQUEST_CATEGORY_RELEASE_TRACKS: "release",
+        REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY: "artist release",
         REQUEST_CATEGORY_PLAYLIST_READS: "playlist",
         REQUEST_CATEGORY_PLAYLIST_UPDATES: "playlist",
     }
@@ -115,13 +117,13 @@ def _request_detail(method, path, params, category):
         if type(value) is int and value >= 0:
             detail += f"; {key} {value}"
 
-    release_types = {
+    artist_release_types = {
         ARTIST_DISCOVERY_RELEASE_GROUPS: "albums, singles and appearances",
-        COLLABORATOR_RELEASE_GROUPS: "albums and singles",
+        COLLABORATOR_ARTIST_RELEASE_GROUPS: "albums and singles",
     }
     groups = (params or {}).get("include_groups")
-    if category == REQUEST_CATEGORY_ARTIST_RELEASES and isinstance(groups, str) and groups in release_types:
-        detail += f"; release types: {release_types[groups]}"
+    if category == REQUEST_CATEGORY_ARTIST_RELEASES and isinstance(groups, str) and groups in artist_release_types:
+        detail += f"; artist release types: {artist_release_types[groups]}"
 
     after = (params or {}).get("after")
     if (category == REQUEST_CATEGORY_FOLLOWED_ARTISTS and isinstance(after, str)
@@ -153,6 +155,7 @@ def _tracked_request(store, category, detail):
 
     outcome = {"quota": False}
     try:
+        record_request(token=category == REQUEST_CATEGORY_TOKEN)
         yield outcome
     except (SpotifyError, requests.RequestException, ValueError):
         if request_info is not None:
@@ -359,6 +362,8 @@ class Spotify:
 
         # An empty list is a valid hit; only cache after a complete fetch.
         if cached is not None:
+            if key != TOP_ARTISTS_TIME_RANGE_CACHE_KEY:
+                record_cache_hit()
             if trace is not None:
                 trace.append(f"{label}: retrieved from today's cache.")
             return cached
@@ -378,6 +383,7 @@ class Spotify:
                 cached_day, cached = previous
                 if not isinstance(cached, list):
                     raise SpotifyError(f"Invalid cached data for {label}") from exc
+                record_cache_hit()
                 if trace is not None:
                     empty_detail = f"; {ZERO_FETCH_RESULTS}" if not cached else ""
                     trace.append(
@@ -494,9 +500,11 @@ class Spotify:
         attempted = False
 
         def report_cache(daily_limit_reached=False, request_failed=False):
+            result_ids = set(state["artists"])
+            reused = len(result_ids & cached_ids - fetched_ids)
+            if reused:
+                record_cache_hit()
             if trace is not None:
-                result_ids = set(state["artists"])
-                reused = len(result_ids & cached_ids - fetched_ids)
                 refreshed = len(result_ids & fetched_ids)
                 details = []
                 if daily_limit_reached:

@@ -2,6 +2,7 @@ import os
 import random
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,7 @@ from zoneinfo import ZoneInfo
 from requests import RequestException
 
 from app.refresh import Refresh
+from app.request_stats import RefreshRequestStats, current_refresh_stats
 from app.selection import (
     build, build_items, interleave, music_candidates, select_music, podcast_candidates, get_api_items,
 )
@@ -135,6 +137,17 @@ class SelectionTests(unittest.TestCase):
                 raise AssertionError("No shows should be fetched")
         self.assertEqual(podcast_candidates(Fake(), [], []), [])
 
+    def test_episode_shortfall_is_a_warning_not_a_source_error(self):
+        class Fake(UncachedSpotify):
+            def get(self, path, **params):
+                return {"items": [], "next": None}
+
+        with patch("app.selection.music_candidates", return_value=[[track(i) for i in range(25)]]), \
+             self.assertLogs("app.selection", level="WARNING"):
+            _, _, detail = build(Fake(), [], [{"show": "news", "count": 1}], [], random.Random(1))
+        self.assertIn("Source warning: Show news has 0 of 1 requested playable episodes", detail)
+        self.assertNotIn("Source error: Show news", detail)
+
     def test_build_without_shows_produces_music_only(self):
         songs = [track(i) for i in range(25)]
         with patch("app.selection.music_candidates", return_value=[songs]):
@@ -215,17 +228,22 @@ class SelectionTests(unittest.TestCase):
                     return {"items": [episode(show, number + i) for i in range(count)], "next": None}
 
             api = Fake()
+            stats = RefreshRequestStats()
+            stats_token = current_refresh_stats.set(stats)
+            self.addCleanup(current_refresh_stats.reset, stats_token)
             api.store.set_many({"timezone": "Europe/Amsterdam"})
             news = [{"show": "news", "count": 2}]
             podcasts = [{"show": "podcast", "count": 1}]
             with patch("app.spotify.datetime") as clock:
                 clock.now.side_effect = lambda tz: datetime(2026, 1, 15, 22, 30, tzinfo=timezone.utc).astimezone(tz)
                 first = podcast_candidates(api, news, podcasts)
+                self.assertEqual(stats.cache_hits, 0)
                 api.store = Store(api.store.path)
                 api.mode = "failed"
                 with patch("app.selection.music_candidates", return_value=[[track(i) for i in range(25)]]), \
                         self.assertLogs("app.selection", level="WARNING"):
                     uris, episode_uris, detail = build(api, [], news, podcasts, random.Random(1))
+                self.assertEqual(stats.cache_hits, 2)
                 self.assertEqual(episode_uris, [item["uri"] for item in first])
                 self.assertTrue(set(episode_uris).issubset(uris))
                 history_id = api.store.start()
@@ -241,6 +259,7 @@ class SelectionTests(unittest.TestCase):
                 api.mode = "new"
                 trace, issues = [], []
                 new = podcast_candidates(api, news, podcasts, issues, trace)
+                self.assertEqual(stats.cache_hits, 2)
                 self.assertNotEqual([item["uri"] for item in new], episode_uris)
                 self.assertEqual(issues, [])
                 self.assertNotIn("reused from today's cache", "\n".join(trace))
@@ -251,6 +270,7 @@ class SelectionTests(unittest.TestCase):
                 trace = []
                 with self.assertLogs("app.selection", level="WARNING"):
                     self.assertEqual(podcast_candidates(api, news, podcasts, trace=trace), [])
+                self.assertEqual(stats.cache_hits, 2)
                 self.assertIn("No episodes from today's cache were available.", "\n".join(trace))
                 self.assertIn("0/2 requested episodes selected", trace[0])
                 self.assertIn("0 episodes selected because Spotify requests failed.", trace[0])
@@ -524,7 +544,7 @@ class SelectionTests(unittest.TestCase):
             ("favorite", "album,single,appears_on"),
             ("other-favorite", "album,single,appears_on"),
             ("collaborator", "album,single")])
-        self.assertIn("Collaborators searched: Guest Artist (collaborator); up to two available releases "
+        self.assertIn("Collaborators searched: Guest Artist (collaborator); up to two available artist releases "
                       "per searched artist were randomly chosen.", "\n".join(trace))
         self.assertEqual(len(groups[-1]), 26)
         self.assertIn("unplayable", [item["id"] for item in groups[-1]])
@@ -565,14 +585,14 @@ class SelectionTests(unittest.TestCase):
     def test_artist_release_selection_includes_catalog_beyond_first_page(self):
         class Fake(UncachedSpotify):
             def __init__(self):
-                self.release_requests = []
+                self.artist_release_requests = []
                 self.selected_albums = []
 
             def get(self, path, **params):
                 if path == "/me/top/artists":
                     return {"items": [{"id": "artist"}]}
                 if path == "/artists/artist/albums":
-                    self.release_requests.append(params)
+                    self.artist_release_requests.append(params)
                     offset = params.get("offset", 0)
                     albums = [{"id": str(i), "release_date": "2026-01-01" if i < 10 else "1990-01-01"}
                               for i in range(offset, min(offset + params["limit"], 20))]
@@ -596,23 +616,23 @@ class SelectionTests(unittest.TestCase):
         api = Fake()
         music_candidates(api, [], FixedRandom(1))
         self.assertEqual(api.selected_albums, ["12", "2"])
-        self.assertEqual(api.release_requests, [
+        self.assertEqual(api.artist_release_requests, [
             {"market": "NL", "include_groups": "album,single,appears_on", "limit": 10},
             {"market": "NL", "include_groups": "album,single,appears_on", "limit": 1, "offset": 12},
         ])
 
-    def test_nearby_randomly_chosen_releases_share_a_request_and_fall_back_on_failure(self):
+    def test_nearby_randomly_chosen_artist_releases_share_a_request_and_fall_back_on_failure(self):
         class Fake(UncachedSpotify):
             def __init__(self, fail_combined):
                 self.fail_combined = fail_combined
-                self.release_requests = []
+                self.artist_release_requests = []
                 self.albums = []
 
             def get(self, path, **params):
                 if path == "/me/top/artists":
                     return {"items": [{"id": "artist"}]}
                 if path == "/artists/artist/albums":
-                    self.release_requests.append(params)
+                    self.artist_release_requests.append(params)
                     offset = params.get("offset", 0)
                     if offset and params["limit"] > 1:
                         if self.fail_combined == "error":
@@ -661,7 +681,7 @@ class SelectionTests(unittest.TestCase):
                 else:
                     music_candidates(api, [], FixedRandom(tuple(positions)))
                 self.assertEqual(api.albums, [str(index) for index in positions])
-                self.assertEqual([(p["offset"], p["limit"]) for p in api.release_requests[1:]], expected)
+                self.assertEqual([(p["offset"], p["limit"]) for p in api.artist_release_requests[1:]], expected)
 
     def test_shared_album_tracks_are_reused_only_within_a_refresh(self):
         class Fake(UncachedSpotify):
@@ -688,13 +708,17 @@ class SelectionTests(unittest.TestCase):
             def followed_artists(self, trace=None):
                 return []
 
+        stats = RefreshRequestStats()
+        stats_token = current_refresh_stats.set(stats)
+        self.addCleanup(current_refresh_stats.reset, stats_token)
         api = Fake()
         for expected_calls in (1, 2):
             trace = []
             groups = music_candidates(api, [], random.Random(1), trace=trace)
             self.assertEqual(api.album_calls, expected_calls)
+            self.assertEqual(stats.cache_hits, expected_calls)
             self.assertEqual([item["id"] for item in groups[2]], ["song", "song"])
-            self.assertIn("Release track lists: 1 reused from this refresh's cache; "
+            self.assertIn("Artist release track lists: 1 reused from this refresh's cache; "
                           "1 retrieved from Spotify during this refresh.", trace)
 
         api = Fake(fail_first=True)
@@ -702,9 +726,10 @@ class SelectionTests(unittest.TestCase):
             groups = music_candidates(api, [], random.Random(1))
         self.assertIn("album unavailable", "\n".join(logs.output))
         self.assertEqual(api.album_calls, 2)
+        self.assertEqual(stats.cache_hits, 2)
         self.assertEqual([item["id"] for item in groups[2]], ["song"])
 
-    def test_artist_and_release_errors_do_not_block_other_music(self):
+    def test_artist_and_artist_release_errors_do_not_block_other_music(self):
         class Fake(UncachedSpotify):
             def get(self, path, **params):
                 if path == "/me/top/artists":
@@ -716,7 +741,7 @@ class SelectionTests(unittest.TestCase):
                 if path == "/artists/good/albums":
                     return {"total": 2, "items": [{"id": "good"}, {"id": "bad"}]}
                 if path == "/albums/bad/tracks":
-                    raise SpotifyError("release unavailable")
+                    raise SpotifyError("artist release unavailable")
                 if path == "/albums/good/tracks":
                     return {"items": [
                         {"id": str(i), "type": "track", "uri": f"spotify:track:{i}",
@@ -737,7 +762,7 @@ class SelectionTests(unittest.TestCase):
         self.assertGreaterEqual(sum(item["duration_ms"] for item in items), 88 * 60000)
         self.assertLessEqual(sum(item["duration_ms"] for item in items), 92 * 60000)
         messages = "\n".join(logs.output)
-        for expected in ("bad", "Retry-After: '45'", "release unavailable", "collaborator",
+        for expected in ("bad", "Retry-After: '45'", "artist release unavailable", "collaborator",
                          "connection failed"):
             self.assertIn(expected, messages)
 
@@ -759,7 +784,7 @@ class SelectionTests(unittest.TestCase):
         trace, issues = [], []
         with self.assertLogs("app.selection", level="WARNING"):
             music_candidates(Fake(), [], random.Random(1), issues, trace)
-        self.assertIn("Release track lists: 0 reused from this refresh's cache; "
+        self.assertIn("Artist release track lists: 0 reused from this refresh's cache; "
                       "0 retrieved from Spotify during this refresh; "
                       "0 retrieved because artist release requests failed.", trace)
 
@@ -967,7 +992,7 @@ class SelectionTests(unittest.TestCase):
                           traces[1])
             self.assertEqual(api.calls.count("/me/tracks"), 1)
             self.assertEqual(api.calls.count("/me/following"), 1)
-            self.assertEqual(api.calls.count("/artists/followed/albums"), 2)
+            self.assertEqual(api.calls.count("/artists/followed/albums"), 1)
 
             api.store.set_cached("liked_tracks_cache", datetime.now().astimezone().date().isoformat(),
                                  [{"track": {"id": "old", "type": "track", "uri": "spotify:track:old",
@@ -1042,8 +1067,10 @@ class SelectionTests(unittest.TestCase):
                     self.assertIn(short_id, [item["id"] for item in groups[0]])
                     self.assertIn("recent-2" if day == 16 else "recent-1", [item["id"] for item in groups[0]])
                     chosen = "short_term" if day == 15 else "medium_term"
-                    self.assertIn(f"Artists searched for discovery (not necessarily selected for the playlist): {chosen}.",
-                                  trace)
+                    self.assertTrue(any(
+                        f"Artists searched for discovery (not necessarily selected for the playlist): {chosen}."
+                        in line for line in trace
+                    ))
                     api.store = Store(api.store.path)
 
             top_calls = [(path, params["time_range"]) for path, params in api.calls if path.startswith("/me/top/")]
@@ -1096,7 +1123,7 @@ class SelectionTests(unittest.TestCase):
             api.store.resolve(True)
             saved = api.store.history()[0]["detail"]
             self.assertIn("Liked tracks: partially retrieved from Spotify during this refresh; not cached.", saved)
-            self.assertIn("Source warning: Using partial liked tracks after an error: page unavailable", saved)
+            self.assertIn("Source error: Using partial liked tracks after an error: page unavailable", saved)
 
     def test_failed_or_invalid_top_and_recent_responses_are_not_cached(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1145,7 +1172,8 @@ class SelectionTests(unittest.TestCase):
             with patch.object(FixedRange, "choice", return_value="long_term") as choice:
                 music_candidates(api, [], FixedRange(1), issues, trace)
             choice.assert_not_called()
-            self.assertEqual(issues, [])
+            self.assertTrue(all("during an earlier discovery fetch today" in issue for issue in issues))
+            self.assertIn("invalid item list", "\n".join(issues))
             self.assertEqual(api.store.get_cached("top_tracks_short_term_cache", day), [])
             self.assertEqual(api.store.get_cached("top_artists_short_term_cache", day), [])
             self.assertEqual(api.store.get_cached("recently_played_tracks_cache", day), [])
@@ -1219,7 +1247,7 @@ class SelectionTests(unittest.TestCase):
                 api.store.finish(history_id, "succeeded", detail)
                 saved = api.store.history()[0]["detail"]
                 self.assertIn(f"Liked tracks: Spotify fetch failed; reused cache from {old_day}.", saved)
-                self.assertIn("Source warning: Using cached liked tracks after an error: Liked tracks unavailable",
+                self.assertIn("Source error: Using cached liked tracks after an error: Liked tracks unavailable",
                               saved)
                 self.assertIn("Retry-After: '32'", saved)
 
@@ -1227,7 +1255,8 @@ class SelectionTests(unittest.TestCase):
                 issues, trace = [], []
                 groups = music_candidates(api, [], FixedRange(1), issues, trace)
                 self.assertFalse(any(groups))
-                self.assertEqual(issues, [])
+                self.assertTrue(all("during an earlier discovery fetch today" in issue for issue in issues))
+                self.assertIn("Spotify unavailable", "\n".join(issues))
                 self.assertIn("Liked tracks: retrieved from Spotify and saved in today's cache.", trace)
                 self.assertNotIn("unavailable", "\n".join(trace))
                 self.assertIsNone(api.store.get_previous_cached("liked_tracks_cache", "2026-01-16"))
@@ -1260,6 +1289,201 @@ class SpotifyTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.store = Store(os.path.join(directory.name, "requests.sqlite"))
+
+    def test_existing_artist_release_track_counts_keep_their_numbering(self):
+        started = datetime.now().astimezone()
+        self.store.start_request("Release tracks", started, "Read; release ID album123")
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.token = "secret"
+        response = Mock(ok=False, status_code=429, headers={},
+                        json=Mock(return_value={}), content=b"{}")
+        with patch("app.spotify.requests.request", return_value=response):
+            with self.assertRaises(SpotifyRateLimitError):
+                api.get("/albums/album123/tracks")
+
+        overview = self.store.request_overview(started.date().isoformat())
+        self.assertEqual(overview["categories"], [
+            {"category": "Artist release tracks", "requests": 2, "errors": 1}
+        ])
+        self.assertEqual(overview["first_quota"]["category"], "Artist release tracks")
+        self.assertEqual(overview["first_quota"]["category_number"], 2)
+        self.assertEqual(overview["first_quota"]["detail"], "Read; artist release ID album123")
+
+    def test_existing_artist_release_quota_details_use_clearer_labels(self):
+        started = datetime.now().astimezone()
+        info = self.store.start_request("Release tracks", started, "Read; release ID album123")
+        self.store.fail_request(info, quota=True)
+        first_quota = Store(self.store.path).request_overview(started.date().isoformat())["first_quota"]
+        self.assertEqual(first_quota["category"], "Artist release tracks")
+        self.assertEqual(first_quota["detail"], "Read; artist release ID album123")
+
+    def test_daily_discovery_cache_limits_requests_and_keeps_partial_results(self):
+        class FixedRandom(random.Random):
+            def shuffle(self, values):
+                pass
+
+            def sample(self, population, k):
+                if len(population) == 30 and k == 2:
+                    return [10, 25]
+                return super().sample(population, k)
+
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.token = "secret"
+        api.followed_artists = Mock(return_value=[])
+        api.liked_tracks = Mock(return_value=[])
+        fail_artist_release = False
+
+        def request(method, url, **kwargs):
+            path = url.removeprefix("https://api.spotify.com/v1")
+            params = kwargs["params"]
+            if path == "/me/top/artists":
+                body = {"items": [{"id": f"artist{i}"} for i in range(8)]}
+            elif path.startswith("/artists/"):
+                artist = path.split("/")[2]
+                offset = params.get("offset", 0)
+                body = {"total": 30, "items": [
+                    {"id": f"{artist}release{i}"}
+                    for i in range(offset, min(offset + params["limit"], 30))
+                ]}
+            elif path.startswith("/albums/"):
+                album = path.split("/")[2]
+                if fail_artist_release and album == "artist0release10":
+                    return Mock(ok=False, status_code=429, headers={},
+                                json=Mock(return_value={}), content=b"{}")
+                artist = album.split("release")[0]
+                credits = [{"id": artist}]
+                if artist == "artist0":
+                    credits += [{"id": f"collaborator{i}"} for i in range(4)]
+                body = {"items": [{
+                    "id": album, "type": "track", "uri": f"spotify:track:{album}",
+                    "duration_ms": 180000, "artists": credits,
+                }]}
+            else:
+                body = {"items": []}
+            return Mock(ok=True, status_code=200, json=Mock(return_value=body), content=b"{}")
+
+        with patch("app.spotify.datetime") as clock, \
+             patch("app.spotify.requests.request", side_effect=request):
+            clock.now.return_value = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+            first = music_candidates(api, [], FixedRandom(1), trace=[])
+            first_overview = self.store.request_overview("2026-01-15")
+            categories = {entry["category"]: entry for entry in first_overview["categories"]}
+            self.assertEqual(categories["Artist releases"]["requests"], 36)
+            self.assertEqual(categories["Artist release tracks"]["requests"], 24)
+            self.assertEqual((len(first[2]), len(first[5])), (16, 8))
+
+            # Reopen SQLite and repeat four times: neither discovery category grows.
+            api.store = Store(self.store.path)
+            for _ in range(4):
+                trace = []
+                cached = music_candidates(api, [], FixedRandom(2), trace=trace)
+                self.assertEqual((cached[2], cached[5]), (first[2], first[5]))
+                self.assertTrue(any("reused from today's cache" in line
+                                    and "no artist release" in line for line in trace))
+            self.assertEqual(self.store.request_overview("2026-01-15"), first_overview)
+
+            # A failed artist release on the next day is saved as a partial result, not retried.
+            clock.now.return_value = datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
+            fail_artist_release = True
+            issues, trace = [], []
+            with self.assertLogs("app.selection", level="WARNING"):
+                partial = music_candidates(api, [], FixedRandom(1), issues, trace)
+            self.assertTrue(any("Retry-After" in issue for issue in issues))
+            self.assertEqual(len(partial[2]), 15)
+            next_overview = self.store.request_overview("2026-01-16")
+            categories = {entry["category"]: entry for entry in next_overview["categories"]}
+            self.assertEqual(categories["Artist releases"]["requests"], 36)
+            self.assertEqual((categories["Artist release tracks"]["requests"],
+                              categories["Artist release tracks"]["errors"]), (24, 1))
+
+            api.store = Store(self.store.path)
+            issues, trace = [], []
+            reused = music_candidates(api, [], FixedRandom(3), issues, trace)
+            self.assertEqual((reused[2], reused[5]), (partial[2], partial[5]))
+            self.assertEqual(self.store.request_overview("2026-01-16"), next_overview)
+            self.assertTrue(any("earlier discovery fetch today" in issue for issue in issues))
+            self.assertTrue(any("earlier discovery fetch encountered errors" in line for line in trace))
+
+    def test_empty_failed_discoveries_are_reused_and_reported_in_history(self):
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.token = "secret"
+        api.followed_artists = Mock(return_value=[])
+        api.liked_tracks = Mock(return_value=[])
+
+        def request(method, url, **kwargs):
+            path = url.removeprefix("https://api.spotify.com/v1")
+            if path == "/artists/favorite/albums":
+                return Mock(ok=False, status_code=429, headers={},
+                            json=Mock(return_value={}), content=b"{}")
+            if path == "/me/top/artists":
+                items = [{"id": "favorite"}]
+            elif path == "/me/top/tracks":
+                items = [{"id": str(i), "type": "track", "uri": f"spotify:track:{i}",
+                          "duration_ms": 240000} for i in range(25)]
+            else:
+                items = []
+            return Mock(ok=True, status_code=200, json=Mock(return_value={"items": items}),
+                        content=b"{}")
+
+        with patch("app.spotify.requests.request", side_effect=request), \
+             self.assertLogs("app.selection", level="WARNING"):
+            build(api, [], [], [], random.Random(1))
+
+        day = datetime.now().astimezone().date().isoformat()
+        before = self.store.request_overview(day)
+        _, _, detail = build(api, [], [], [], random.Random(2))
+        after = self.store.request_overview(day)
+        self.assertEqual(before, after)
+        self.assertIn("0 artist tracks and 0 collaborator tracks", detail)
+        self.assertIn("the earlier discovery fetch encountered errors", detail)
+        self.assertIn("Source error: Skipping artist releases for artist favorite:", detail)
+        self.assertIn("during an earlier discovery fetch today", detail)
+        self.assertIn("artist discoveries: 0 (no candidates because source retrieval failed)", detail)
+
+    def test_discovery_fetch_crossing_midnight_is_cached_for_its_start_day(self):
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        self.store.set_many({"timezone": "UTC"})
+        api.followed_artists = Mock(return_value=[])
+        api.liked_tracks = Mock(return_value=[])
+        first = datetime(2026, 1, 15, 23, 59, tzinfo=timezone.utc)
+        next_day = datetime(2026, 1, 16, 0, 0, tzinfo=timezone.utc)
+
+        with patch("app.spotify.datetime") as clock:
+            clock.now.return_value = first
+
+            def get(path, **params):
+                if path == "/me/top/artists":
+                    return {"items": [{"id": "favorite"}]}
+                if path == "/artists/favorite/albums":
+                    clock.now.return_value = next_day
+                    return {"total": 0, "items": []}
+                return {"items": []}
+
+            api.get = Mock(side_effect=get)
+            music_candidates(api, [], random.Random(1))
+            self.assertIsNotNone(self.store.get_cached("discovery_tracks_cache", "2026-01-15"))
+            self.assertIsNone(self.store.get_cached("discovery_tracks_cache", "2026-01-16"))
+            music_candidates(api, [], random.Random(2))
+            self.assertEqual(sum(call.args[0] == "/artists/favorite/albums"
+                                 for call in api.get.call_args_list), 2)
+
+    def test_unrelated_podcast_failure_is_not_saved_as_discovery_failure(self):
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.get = Mock(return_value={"items": []})
+        api.followed_artists = Mock(return_value=[])
+        api.liked_tracks = Mock(return_value=[])
+        issues = ["Failed to fetch remaining episodes for show news: unavailable"]
+        music_candidates(api, [], random.Random(1), issues)
+
+        later_issues, trace = [], []
+        music_candidates(api, [], random.Random(2), later_issues, trace)
+        self.assertEqual(later_issues, [])
+        self.assertFalse(any("earlier discovery fetch encountered errors" in line for line in trace))
 
     def test_configured_market_reaches_all_market_sensitive_requests(self):
         self.store.set_many({"client_id": "client", "refresh_token": "token", "market": "US"})
@@ -1343,7 +1567,7 @@ class SpotifyTests(unittest.TestCase):
             ("GET", "/me/following", {}, "Followed artists"),
             ("GET", "/shows/show123/episodes", {}, "Show episodes"),
             ("GET", "/artists/artist123/albums", {}, "Artist releases"),
-            ("GET", "/albums/album123/tracks", {}, "Release tracks"),
+            ("GET", "/albums/album123/tracks", {}, "Artist release tracks"),
             ("GET", "/playlists/playlist123/items", {}, "Playlist reads"),
             ("PUT", "/playlists/playlist123/items", {}, "Playlist updates"),
             ("GET", "/other", {}, "Other Spotify API requests"),
@@ -1400,7 +1624,7 @@ class SpotifyTests(unittest.TestCase):
         self.assertEqual(overview["first_quota"], {
             "number": 2, "category": "Artist releases", "category_number": 1,
             "started": before_midnight.isoformat(),
-            "detail": "Read; artist ID artist123; offset 20; limit 10; release types: albums and singles",
+            "detail": "Read; artist ID artist123; offset 20; limit 10; artist release types: albums and singles",
         })
         categories = {entry["category"]: entry for entry in overview["categories"]}
         self.assertEqual((categories["Liked tracks"]["requests"], categories["Liked tracks"]["errors"]), (3, 2))
@@ -1953,6 +2177,144 @@ class RefreshTests(unittest.TestCase):
         self.store.set_many({"playlist_id": "target", "source_ids": []})
         self.service = Refresh(self.store)
 
+    def test_request_stats_include_token_failures_cache_and_playlist_write(self):
+        self.store.set_many({"client_id": "client", "refresh_token": "saved"})
+        day = datetime.now().astimezone().date().isoformat()
+        self.store.set_cached("liked_tracks_cache", day, [])
+        self.store.set_cached("top_artists_time_range_cache", day, "short_term")
+        token = Mock(ok=True, json=Mock(return_value={"access_token": "access"}))
+
+        def request(method, url, **kwargs):
+            if method == "PUT":
+                return Mock(ok=True, content=b"")
+            if url.endswith("/me/tracks"):
+                return Mock(ok=False, status_code=429, headers={},
+                            json=Mock(return_value={}), content=b"{}")
+            return Mock(ok=True, content=b"{}", json=Mock(return_value={
+                "items": [{"item": {"uri": "spotify:track:old"}}], "next": None,
+            }))
+
+        def build_with_cache(api, *args):
+            self.assertEqual(api.daily_cached("liked_tracks_cache", lambda: ["unexpected"]), [])
+            self.assertEqual(api.daily_cached("top_artists_time_range_cache", lambda: "long_term"), "short_term")
+            with self.assertRaises(SpotifyRateLimitError):
+                api.get("/me/tracks")
+            return ["spotify:track:new"], [], "90 minutes"
+
+        with patch("app.spotify.requests.post", return_value=token), \
+             patch("app.spotify.requests.request", side_effect=request), \
+             patch("app.refresh.build", side_effect=build_with_cache):
+            self.service.run()
+
+        entry = Store(self.store.path).history()[0]
+        self.assertEqual(entry["status"], "succeeded")
+        self.assertEqual((entry["api_requests"], entry["token_requests"], entry["cache_hits"]), (3, 1, 1))
+        self.assertIsNone(current_refresh_stats.get())
+
+    def test_request_stats_include_playlist_verification_after_failure(self):
+        self.store.set_many({"client_id": "client", "refresh_token": "saved"})
+        token = Mock(ok=True, json=Mock(return_value={"access_token": "access"}))
+        playlist = Mock(ok=True, content=b"{}", json=Mock(return_value={
+            "items": [{"item": {"uri": "spotify:track:old"}}], "next": None,
+        }))
+        with patch("app.spotify.requests.post", return_value=token), \
+             patch("app.spotify.requests.request", side_effect=[
+                 playlist, RequestException("connection lost"), playlist,
+             ]), patch("app.refresh.build", return_value=(["spotify:track:new"], [], "90 minutes")), \
+             self.assertLogs("app.refresh", level="ERROR"):
+            with self.assertRaisesRegex(SpotifyError, "Spotify change was not applied"):
+                self.service.run()
+        entry = self.store.history()[0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertEqual((entry["api_requests"], entry["token_requests"], entry["cache_hits"]), (3, 1, 0))
+
+    def test_request_stats_include_failed_token_request(self):
+        self.store.set_many({"client_id": "client", "refresh_token": "saved"})
+        with patch("app.spotify.requests.post", side_effect=RequestException("token unavailable")), \
+             self.assertLogs("app.refresh", level="ERROR"):
+            with self.assertRaises(RequestException):
+                self.service.run()
+        entry = self.store.history()[0]
+        self.assertEqual(entry["status"], "failed")
+        self.assertEqual((entry["api_requests"], entry["token_requests"], entry["cache_hits"]), (0, 1, 0))
+
+    def test_stats_storage_failure_does_not_change_successful_refresh(self):
+        api = Mock()
+        api.playlist_items.return_value = ["old"]
+        with patch("app.refresh.Spotify", return_value=api), \
+             patch("app.refresh.build", return_value=(["new"], [], "90 minutes")), \
+             patch.object(self.store, "save_request_stats", side_effect=sqlite3.OperationalError("locked")), \
+             self.assertLogs("app.refresh", level="ERROR") as logged:
+            self.service.run()
+        self.assertIn("Could not save refresh request statistics", "\n".join(logged.output))
+        self.assertEqual(self.store.history()[0]["status"], "succeeded")
+        self.assertIsNone(self.store.history()[0]["api_requests"])
+
+    def test_existing_database_history_has_unknown_request_stats(self):
+        path = os.path.join(self.temp.name, "old.sqlite")
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE history (id INTEGER PRIMARY KEY, started TEXT NOT NULL, "
+                       "status TEXT NOT NULL, detail TEXT NOT NULL, scheduled_key TEXT UNIQUE)")
+            db.execute("INSERT INTO history (started, status, detail) VALUES (?, ?, ?)",
+                       ("2026-01-01", "succeeded", "old"))
+        entry = Store(path).history()[0]
+        self.assertEqual(entry["detail"], "old")
+        self.assertEqual((entry["api_requests"], entry["token_requests"], entry["cache_hits"]),
+                         (None, None, None))
+
+    def test_reconciliation_preserves_old_refresh_counts(self):
+        self.store.set_many({"client_id": "client", "refresh_token": "saved"})
+        old_id = self.store.start()
+        self.store.prepare(old_id, "target", ["old"], ["previous"], [], "previous")
+        self.store.finish(old_id, "uncertain", "unreachable")
+        self.store.save_request_stats(old_id, RefreshRequestStats(5, 1, 2))
+        token = Mock(ok=True, json=Mock(return_value={"access_token": "access"}))
+        playlist = Mock(ok=True, content=b"{}", json=Mock(return_value={
+            "items": [{"item": {"uri": "previous"}}], "next": None,
+        }))
+        with patch("app.spotify.requests.post", return_value=token), \
+             patch("app.spotify.requests.request", side_effect=[playlist, playlist, Mock(ok=True, content=b"")]), \
+             patch("app.refresh.build", return_value=(["new"], [], "new")):
+            self.service.run()
+        current, previous = self.store.history()
+        self.assertEqual(previous["status"], "succeeded")
+        self.assertEqual((previous["api_requests"], previous["token_requests"], previous["cache_hits"]),
+                         (5, 1, 2))
+        self.assertEqual((current["api_requests"], current["token_requests"], current["cache_hits"]),
+                         (3, 1, 0))
+
+    def test_concurrent_refreshes_keep_counts_separate(self):
+        other = Store(os.path.join(self.temp.name, "other.sqlite"))
+        for store in (self.store, other):
+            store.set_many({"client_id": "client", "refresh_token": "saved", "playlist_id": "target"})
+        day = datetime.now().astimezone().date().isoformat()
+        self.store.set_cached("liked_tracks_cache", day, [])
+        barrier = threading.Barrier(2)
+        token = Mock(ok=True, json=Mock(return_value={"access_token": "access"}))
+
+        def request(method, url, **kwargs):
+            if method == "PUT":
+                return Mock(ok=True, content=b"")
+            return Mock(ok=True, content=b"{}", json=Mock(return_value={"items": [], "next": None}))
+
+        def build_concurrently(api, *args):
+            barrier.wait(timeout=5)
+            if api.store.path == self.store.path:
+                api.daily_cached("liked_tracks_cache", lambda: ["unexpected"])
+                api.get("/me/tracks")
+            return ["new"], [], "new"
+
+        with patch("app.spotify.requests.post", return_value=token), \
+             patch("app.spotify.requests.request", side_effect=request), \
+             patch("app.refresh.build", side_effect=build_concurrently), \
+             ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(service.run) for service in (self.service, Refresh(other))]
+            for future in futures:
+                future.result()
+        first, second = self.store.history()[0], other.history()[0]
+        self.assertEqual((first["api_requests"], first["token_requests"], first["cache_hits"]), (3, 1, 1))
+        self.assertEqual((second["api_requests"], second["token_requests"], second["cache_hits"]), (2, 1, 0))
+
     def test_disabling_automatic_refresh_does_not_block_manual_refresh(self):
         self.store.set_many({"automatic_refresh_enabled": False})
         api = Mock()
@@ -2223,7 +2585,7 @@ class RefreshTests(unittest.TestCase):
             self.service.run()
         entry = self.store.history()[0]
         self.assertEqual(entry["status"], "succeeded")
-        self.assertIn("Source warning: Skipping short-term top tracks", entry["detail"])
+        self.assertIn("Source error: Skipping short-term top tracks", entry["detail"])
         self.assertIn("Top tracks short term: Spotify fetch failed; no data retrieved from cache; "
                       "0 results because the fetch failed.", entry["detail"])
         self.assertIn("current and recent: 0 (no candidates because source retrieval failed)", entry["detail"])

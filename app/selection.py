@@ -6,27 +6,31 @@ from requests import RequestException
 
 from .constants import (
     ARTIST_DISCOVERY_RELEASE_GROUPS, ARTIST_RELEASE_ERROR_PREFIXES, ARTIST_RELEASE_PAGE_SIZE,
-    CACHE_KEY_SUFFIX, COLLABORATOR_RELEASE_GROUPS, COMBINED_ARTIST_RELEASE_LOOKUP_PREFIX,
-    DURATION_TOLERANCE_MINUTES, EMPTY_ARTIST_POOL_ERROR, EMPTY_GROUP_ERROR, EPISODE_TYPE,
+    CACHE_KEY_SUFFIX, COLLABORATOR_ARTIST_RELEASE_GROUPS, COMBINED_ARTIST_RELEASE_LOOKUP_PREFIX,
+    DISCOVERY_TRACKS_CACHE_KEY, DURATION_TOLERANCE_MINUTES, EMPTY_ARTIST_POOL_ERROR,
+    EMPTY_GROUP_ERROR, EPISODE_TYPE,
     HISTORY_TOP_ARTISTS_PREFIX, ITEMS_DETAIL_SEPARATOR, LIKED_TRACKS_CACHE_KEY, LONG_TERM,
     MAX_ARTISTS_FOR_DISCOVERY, MAX_COLLABORATORS_FOR_DISCOVERY, MAX_RELEASES_PER_ARTIST,
     MAX_RELEASES_PER_ARTIST_TEXT, MAX_SPOTIFY_PLAYLIST_ITEMS, MAX_TRACKS_PER_CANDIDATE_GROUP,
     MEDIUM_TERM, MILLISECONDS_PER_MINUTE, MILLISECONDS_PER_SECOND, MUSIC_GROUP_NAMES,
     PERCENTAGE_BASE, RESERVED_FAVORITE_GROUP_COUNT,
     PLAYLIST_SOURCE_ERROR_PREFIXES, RECENT_TRACKS_CACHE_KEY, SELECTION_DETAIL_SEPARATOR,
-    SHOW_EPISODE_CACHE_PREFIX, SHOW_EPISODE_FETCH_FAILURE_PREFIX, SHOW_HISTORY_SEPARATOR,
-    SHORT_TERM, SKIP_ARTIST_RELEASES_PREFIX, SKIP_RELEASE_POSITION_PREFIX, SOURCE_CACHED_PREFIX,
+    SHOW_EPISODE_CACHE_PREFIX, SHOW_EPISODE_FETCH_FAILURE_PREFIX, SHOW_EPISODE_SHORTFALL_PREFIX,
+    SHOW_EPISODE_SHORTFALL_SUFFIX, SHOW_HISTORY_SEPARATOR,
+    SHORT_TERM, SKIP_ARTIST_RELEASES_PREFIX, SKIP_ARTIST_RELEASE_POSITION_PREFIX, SOURCE_CACHED_PREFIX,
     SOURCE_FOLLOWED_ARTISTS, SOURCE_LIKED_TRACKS, SOURCE_LONG_TERM_TOP_TRACKS,
     SOURCE_MEDIUM_TERM_TOP_TRACKS, SOURCE_PARTIAL_PREFIX, SOURCE_PLAYLISTS,
     SOURCE_RECENT_TRACKS,
-    SOURCE_SHORT_TERM_TOP_TRACKS, SOURCE_SKIP_PREFIX, SOURCE_TOP_ARTISTS, SOURCE_WARNING_PREFIX,
+    SOURCE_ERROR_PREFIX, SOURCE_SHORT_TERM_TOP_TRACKS, SOURCE_SKIP_PREFIX, SOURCE_TOP_ARTISTS,
+    SOURCE_WARNING_PREFIX,
     SPOTIFY_ALBUM_TRACKS_PATH, SPOTIFY_ARTIST_ALBUMS_PATH, SPOTIFY_PAGE_SIZE,
     SPOTIFY_PLAYLIST_ITEMS_PATH, SPOTIFY_RECENT_TRACKS_PATH, SPOTIFY_SHOW_EPISODES_PATH,
     SPOTIFY_TOP_ITEMS_PATH, TARGET_DURATION_MINUTES,
     TOP_ARTISTS_TIME_RANGE_CACHE_KEY, TOP_ITEMS_CACHE_KEY_PREFIX, TOP_TIME_RANGE_LABELS,
     TOP_TIME_RANGES, TRACK_TYPE,
-    ZERO_RELEASE_LISTS_ERROR, ZERO_SHOW_EPISODES_ERROR,
+    ZERO_ARTIST_RELEASE_LISTS_ERROR, ZERO_SHOW_EPISODES_ERROR,
 )
+from .request_stats import record_cache_hit
 from .spotify import SpotifyCachedError, SpotifyError, SpotifyPartialError
 
 log = logging.getLogger(__name__)
@@ -51,6 +55,19 @@ def api_warning(issues, message, *args):
     log.warning(message, *args)
     if issues is not None:
         issues.append(message % args)
+
+
+def is_source_error(detail):
+    # Not having enough playable episodes can happen without any Spotify error.
+    return not (detail.startswith(SHOW_EPISODE_SHORTFALL_PREFIX)
+                and detail.endswith(SHOW_EPISODE_SHORTFALL_SUFFIX))
+
+
+def source_issue_lines(issues):
+    return [
+        (SOURCE_ERROR_PREFIX if is_source_error(issue) else SOURCE_WARNING_PREFIX) + issue
+        for issue in issues
+    ]
 
 
 def get_api_items(source, fetch, issues=None):
@@ -147,6 +164,9 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
                         if len(current) == count:
                             break
 
+            if reused:
+                record_cache_hit()
+
             # Keep today's newest fetched episodes, including successful pages before an error.
             if fetched:
                 saved = []
@@ -162,7 +182,7 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
             if len(current) != count:
                 api_warning(
                     issues,
-                    "Show %s has %s of %s requested playable episodes",
+                    SHOW_EPISODE_SHORTFALL_PREFIX + "%s has %s of %s" + SHOW_EPISODE_SHORTFALL_SUFFIX,
                     show,
                     len(current),
                     count,
@@ -213,6 +233,9 @@ def podcast_candidates(api, news_shows, podcast_shows, issues=None, trace=None):
 
 
 def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
+    if issues is None:
+        issues = []
+
     def cached_items(key, path, trace_target=None, **params):
         def fetch():
             result = api.get(path, **params)
@@ -338,6 +361,110 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
             and artist["id"]
         }.values()
     )
+
+    discovery_issues = []
+    discovery_trace = []
+    discovery_fetched = False
+    artist_sources = (
+        SOURCE_SHORT_TERM_TOP_TRACKS, SOURCE_MEDIUM_TERM_TOP_TRACKS, SOURCE_LONG_TERM_TOP_TRACKS,
+        SOURCE_RECENT_TRACKS, SOURCE_LIKED_TRACKS, SOURCE_TOP_ARTISTS, SOURCE_FOLLOWED_ARTISTS,
+    )
+    artist_source_issues = [
+        issue for issue in issues
+        if any(source_error([issue], source) for source in artist_sources)
+        or issue.startswith(PLAYLIST_SOURCE_ERROR_PREFIXES)
+    ]
+
+    def fetch_discoveries():
+        nonlocal discovery_fetched
+        discovery_fetched = True
+        discoveries, collaborator_tracks = discovery_candidates(
+            api, artists, rng, discovery_issues, discovery_trace
+        )
+
+        # Save partial results too: discovery is attempted only once per local day.
+        return {
+            "discoveries": discoveries,
+            "collaborators": collaborator_tracks,
+            "issues": discovery_issues + (artist_source_issues if not artists else []),
+            "selection": discovery_trace[:2],
+        }
+
+    discovery_cache = api.daily_cached(DISCOVERY_TRACKS_CACHE_KEY, fetch_discoveries)
+    if (
+        not isinstance(discovery_cache, dict)
+        or not isinstance(discovery_cache.get("discoveries"), list)
+        or not isinstance(discovery_cache.get("collaborators"), list)
+        or not isinstance(discovery_cache.get("issues"), list)
+        or not all(isinstance(issue, str) for issue in discovery_cache["issues"])
+        or not isinstance(discovery_cache.get("selection"), list)
+        or not all(isinstance(line, str) for line in discovery_cache["selection"])
+    ):
+        raise SpotifyError("Invalid cached discovery tracks")
+
+    if trace is not None:
+        fetch_detail = "; ".join(
+            line.partition(": ")[2].removesuffix(".") for line in top_artist_trace
+        )
+        range_origin = "chosen randomly for today" if range_chosen else "reused from today's cache"
+        artist_pool_detail = (
+            f"{len(artists)} unique artists from top, followed and retrieved tracks, "
+            "including source playlists"
+        )
+        if not discovery_fetched:
+            artist_pool_detail += "; today's discovery selection was already cached"
+        elif not artists and artist_source_issues:
+            artist_pool_detail += f"; {EMPTY_ARTIST_POOL_ERROR}"
+        else:
+            artist_pool_detail += " were shuffled"
+        trace.append(
+            f"{HISTORY_TOP_ARTISTS_PREFIX}{TOP_TIME_RANGE_LABELS[random_time_range]}: "
+            f"{fetch_detail}; time range {range_origin}; {artist_pool_detail}."
+        )
+
+    discoveries = discovery_cache["discoveries"]
+    collaborator_tracks = discovery_cache["collaborators"]
+    if discovery_fetched:
+        issues.extend(discovery_issues)
+        if trace is not None:
+            trace.extend(discovery_trace)
+            trace.append(
+                f"Discovery tracks: {len(discoveries)} artist tracks and "
+                f"{len(collaborator_tracks)} collaborator tracks saved in today's cache."
+            )
+    else:
+        issues.extend(f"{issue} (during an earlier discovery fetch today)"
+                      for issue in discovery_cache["issues"])
+        if trace is not None:
+            origin = "; the earlier discovery fetch encountered errors" if discovery_cache["issues"] else ""
+            trace.append(
+                f"Discovery tracks: reused from today's cache{origin}; "
+                f"{len(discoveries)} artist tracks and {len(collaborator_tracks)} collaborator tracks; "
+                "no artist release or artist release track requests during this refresh."
+            )
+            trace.extend(f"Earlier today: {line}" for line in discovery_cache["selection"])
+
+    groups = (
+        top_and_recent_tracks, older_top_tracks, discoveries,
+        configured, liked_tracks, collaborator_tracks,
+    )
+
+    # Shuffle each group before selecting its valid tracks.
+    for group in groups:
+        rng.shuffle(group)
+    return [
+        list(
+            islice(
+                (item for item in group if valid(item, TRACK_TYPE) and item.get("id")),
+                MAX_TRACKS_PER_CANDIDATE_GROUP,
+            )
+        )
+        for group in groups
+    ]
+
+
+def discovery_candidates(api, artists, rng, issues, trace):
+    # Keep the selected artists and collaborators fixed only for this day's discovery fetch.
     rng.shuffle(artists)
     discoveries = []
 
@@ -348,51 +475,20 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
             else artist["id"]
             for artist in artists[:MAX_ARTISTS_FOR_DISCOVERY]
         ]
-        fetch_detail = "; ".join(
-            line.partition(": ")[2].removesuffix(".") for line in top_artist_trace
-        )
-        range_origin = "chosen randomly for today" if range_chosen else "reused from today's cache"
-        artist_sources = (
-            SOURCE_SHORT_TERM_TOP_TRACKS,
-            SOURCE_MEDIUM_TERM_TOP_TRACKS,
-            SOURCE_LONG_TERM_TOP_TRACKS,
-            SOURCE_RECENT_TRACKS,
-            SOURCE_LIKED_TRACKS,
-            SOURCE_TOP_ARTISTS,
-            SOURCE_FOLLOWED_ARTISTS,
-        )
-        artist_source_failed = (
-            any(source_error(issues, source) for source in artist_sources)
-            or any(issue.startswith(PLAYLIST_SOURCE_ERROR_PREFIXES) for issue in (issues or []))
-        )
-        artist_pool_detail = (
-            f"{len(artists)} unique artists from top, followed and retrieved tracks, "
-            "including source playlists"
-        )
-        if not artists and artist_source_failed:
-            artist_pool_detail += f"; {EMPTY_ARTIST_POOL_ERROR}"
-        else:
-            artist_pool_detail += " were shuffled"
-        trace.append(
-            f"{HISTORY_TOP_ARTISTS_PREFIX}{TOP_TIME_RANGE_LABELS[random_time_range]}: "
-            f"{fetch_detail}; time range {range_origin}; {artist_pool_detail}."
-        )
         trace.append("Artists searched for discovery (not necessarily selected for the playlist): "
                      + (", ".join(selected_names) if selected_names else "none") + ".")
 
-    release_track_cache = {}
-    release_tracks_reused = 0
-    release_tracks_fetched = 0
+    artist_release_track_cache = {}
+    artist_release_tracks_reused = 0
+    artist_release_tracks_fetched = 0
 
-    def artist_tracks(artist_id, include_groups):
-        nonlocal release_tracks_reused, release_tracks_fetched
-        # Find music from one artist. include_groups determines which kinds of
-        # releases to search, such as albums, singles, or appearances.
+    def artist_release_tracks(artist_id, include_groups):
+        nonlocal artist_release_tracks_reused, artist_release_tracks_fetched
+        # Find music from one artist; include_groups selects albums, singles, or appearances.
         path = SPOTIFY_ARTIST_ALBUMS_PATH.format(artist_id=artist_id)
         params = {"market": api.market, "include_groups": include_groups}
 
-        # Spotify returns at most ARTIST_RELEASE_PAGE_SIZE releases per request. This first request
-        # also tells us how many releases are available in total.
+        # The first page also tells us how many artist releases are available in total.
         try:
             page = api.get(path, **params, limit=ARTIST_RELEASE_PAGE_SIZE)
             if not isinstance(page, dict):
@@ -411,7 +507,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
             )
             return []
 
-        # Pick random positions from the full list so old and new releases have equal odds.
+        # Pick random positions so old and new artist releases have equal odds.
         indices = rng.sample(range(total), min(total, MAX_RELEASES_PER_ARTIST))
         combined = {}
 
@@ -445,7 +541,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
         for index in indices:
             try:
                 if index < len(page["items"]):
-                    # This release was included in the first request.
+                    # This artist release was included in the first request.
                     album = page["items"][index]
                 elif index in combined:
                     album = combined[index]
@@ -467,33 +563,34 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
                 ):
                     raise SpotifyError("Spotify returned an artist release without an ID")
 
-                # Reuse a release only within this refresh; failed requests are never cached.
+                # Reuse artist release tracks within this fetch; failed requests are never cached.
                 album_id = album["id"]
-                if album_id in release_track_cache:
-                    release_tracks_reused += 1
+                if album_id in artist_release_track_cache:
+                    artist_release_tracks_reused += 1
+                    record_cache_hit()
                 else:
-                    release = api.get(
+                    artist_release = api.get(
                         SPOTIFY_ALBUM_TRACKS_PATH.format(album_id=album_id),
                         market=api.market,
                         limit=SPOTIFY_PAGE_SIZE,
                     )
                     if (
-                        not isinstance(release, dict)
-                        or not isinstance(release.get("items"), list)
+                        not isinstance(artist_release, dict)
+                        or not isinstance(artist_release.get("items"), list)
                         or not all(
                             isinstance(item, dict)
                             and (item.get("artists") is None or isinstance(item["artists"], list))
-                            for item in release["items"]
+                            for item in artist_release["items"]
                         )
                     ):
                         raise SpotifyError("Spotify returned invalid artist release tracks")
-                    release_track_cache[album_id] = release["items"]
-                    release_tracks_fetched += 1
-                tracks.extend(release_track_cache[album_id])
+                    artist_release_track_cache[album_id] = artist_release["items"]
+                    artist_release_tracks_fetched += 1
+                tracks.extend(artist_release_track_cache[album_id])
             except (SpotifyError, RequestException) as exc:
                 api_warning(
                     issues,
-                    SKIP_RELEASE_POSITION_PREFIX + "%s for artist %s: %s",
+                    SKIP_ARTIST_RELEASE_POSITION_PREFIX + "%s for artist %s: %s",
                     index,
                     artist_id,
                     exc,
@@ -506,7 +603,7 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
 
     # Search the selected artists and collect collaborators from their shared tracks.
     for artist in artists[:MAX_ARTISTS_FOR_DISCOVERY]:
-        tracks = artist_tracks(artist["id"], ARTIST_DISCOVERY_RELEASE_GROUPS)
+        tracks = artist_release_tracks(artist["id"], ARTIST_DISCOVERY_RELEASE_GROUPS)
         discoveries.extend(tracks)
 
         # Album track lists can include unrelated artists; require a shared credit.
@@ -541,13 +638,13 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
         trace.append(
             "Collaborators searched: "
             + (", ".join(labels) if labels else "none")
-            + f"; up to {MAX_RELEASES_PER_ARTIST_TEXT} available releases per searched artist "
+            + f"; up to {MAX_RELEASES_PER_ARTIST_TEXT} available artist releases per searched artist "
             "were randomly chosen."
         )
 
     # Search collaborators once; do not recursively follow their collaborators.
     for artist_id in collaborator_ids[:MAX_COLLABORATORS_FOR_DISCOVERY]:
-        tracks = artist_tracks(artist_id, COLLABORATOR_RELEASE_GROUPS)
+        tracks = artist_release_tracks(artist_id, COLLABORATOR_ARTIST_RELEASE_GROUPS)
         collaborator_tracks.extend(
             item for item in tracks
             if any(isinstance(credit, dict) and credit.get("id") == artist_id
@@ -555,36 +652,20 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
         )
 
     if trace is not None:
-        release_request_failed = any(
+        artist_release_request_failed = any(
             issue.startswith(ARTIST_RELEASE_ERROR_PREFIXES) for issue in (issues or [])
         )
-        release_failure_detail = (
-            f"; {ZERO_RELEASE_LISTS_ERROR}"
-            if release_tracks_fetched == 0 and release_request_failed else ""
+        artist_release_failure_detail = (
+            f"; {ZERO_ARTIST_RELEASE_LISTS_ERROR}"
+            if artist_release_tracks_fetched == 0 and artist_release_request_failed else ""
         )
         trace.append(
-            f"Release track lists: {release_tracks_reused} reused from this refresh's cache; "
-            f"{release_tracks_fetched} retrieved from Spotify during this refresh"
-            f"{release_failure_detail}."
+            f"Artist release track lists: {artist_release_tracks_reused} reused from this refresh's cache; "
+            f"{artist_release_tracks_fetched} retrieved from Spotify during this refresh"
+            f"{artist_release_failure_detail}."
         )
 
-    groups = (
-        top_and_recent_tracks, older_top_tracks, discoveries,
-        configured, liked_tracks, collaborator_tracks,
-    )
-
-    # Shuffle each group before selecting its valid tracks.
-    for group in groups:
-        rng.shuffle(group)
-    return [
-        list(
-            islice(
-                (item for item in group if valid(item, TRACK_TYPE) and item.get("id")),
-                MAX_TRACKS_PER_CANDIDATE_GROUP,
-            )
-        )
-        for group in groups
-    ]
+    return discoveries, collaborator_tracks
 
 
 def select_music(groups, podcasts, rng, trace=None, issues=None):
@@ -743,7 +824,7 @@ def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None, trace=No
             details = list(dict.fromkeys(rate_limits[:1] + issues[:3]))
             message += f"; source errors: {'; '.join(details)}"
         if trace is not None:
-            trace.extend(f"{SOURCE_WARNING_PREFIX}{issue}" for issue in issues)
+            trace.extend(source_issue_lines(issues))
             if trace:
                 message += (
                     SELECTION_DETAIL_SEPARATOR
@@ -759,7 +840,7 @@ def build_items(api, playlist_ids, news_shows, podcast_shows, rng=None, trace=No
         f"podcasts {podcast_percentage:.1f}%"
     )
     if trace is not None:
-        trace.extend(f"{SOURCE_WARNING_PREFIX}{issue}" for issue in issues)
+        trace.extend(source_issue_lines(issues))
     return result, [item["uri"] for item in podcasts], detail
 
 

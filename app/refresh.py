@@ -1,10 +1,12 @@
 import logging
+import sqlite3
 import threading
 
 from .constants import (
     DAILY_DRIVE_SOURCE_PLAYLIST_ERROR, MAX_PLAYLIST_ITEMS_ERROR,
     MAX_SPOTIFY_PLAYLIST_ITEMS, HISTORY_STATUS_FAILED, HISTORY_STATUS_UNCERTAIN,
 )
+from .request_stats import RefreshRequestStats, current_refresh_stats
 from .selection import build
 from .spotify import Spotify, SpotifyError, SpotifyRateLimitError
 from .store import selection_details
@@ -47,6 +49,8 @@ class Refresh:
 
         history_id = None
         detail = None
+        stats = RefreshRequestStats()
+        stats_token = current_refresh_stats.set(stats)
         try:
             # Recheck after acquiring the lock: the setting may have changed since scheduling.
             if scheduled_key is not None and not self.store.automatic_refresh_enabled():
@@ -118,4 +122,12 @@ class Refresh:
                 self.store.finish(history_id, status, error)
             raise
         finally:
-            self.lock.release()
+            current_refresh_stats.reset(stats_token)
+            try:
+                if history_id is not None:
+                    self.store.save_request_stats(history_id, stats)
+            except sqlite3.Error:
+                # A statistics write must not turn a successful playlist change into a failure.
+                log.exception("Could not save refresh request statistics")
+            finally:
+                self.lock.release()

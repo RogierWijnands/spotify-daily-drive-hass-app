@@ -9,7 +9,8 @@ from .constants import (
     DEFAULT_AUTOMATIC_REFRESH_ENABLED, FOLLOWED_ARTISTS_CACHE_KEY,
     HISTORY_ENTRY_LIMIT, HISTORY_STATUS_FAILED, HISTORY_STATUS_IN_PROGRESS,
     HISTORY_STATUS_SUCCEEDED, HISTORY_STATUS_UNCERTAIN, ITEMS_DETAIL_SEPARATOR,
-    NO_UNCERTAIN_CHANGE_ERROR,
+    NO_UNCERTAIN_CHANGE_ERROR, REQUEST_CATEGORY_ARTIST_RELEASES, REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS,
+    REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY,
     SELECTION_DETAIL_SEPARATOR, SHOW_EPISODE_CACHE_PREFIX,
 )
 
@@ -31,7 +32,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS history (
                     id INTEGER PRIMARY KEY, started TEXT NOT NULL, status TEXT NOT NULL,
-                    detail TEXT NOT NULL, scheduled_key TEXT UNIQUE
+                    detail TEXT NOT NULL, scheduled_key TEXT UNIQUE,
+                    api_requests INTEGER, token_requests INTEGER, cache_hits INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS episodes (
                     uri TEXT PRIMARY KEY, last_used TEXT NOT NULL
@@ -56,6 +58,12 @@ class Store:
                     PRIMARY KEY (day, category)
                 );
             """)
+            # Older history has no per-refresh counts; leave those entries unknown.
+            history_columns = {row["name"] for row in db.execute("PRAGMA table_info(history)")}
+            for column in ("api_requests", "token_requests", "cache_hits"):
+                if column not in history_columns:
+                    db.execute(f"ALTER TABLE history ADD COLUMN {column} INTEGER")
+
             # Only a persisted pending write could have reached Spotify before a restart.
             db.execute(
                 """
@@ -205,17 +213,33 @@ class Store:
                 "WHERE day=? ORDER BY category",
                 (day,),
             ).fetchall()
+
+        # Keep the original database key so requests recorded before this rename still count.
+        def display_category(category):
+            return (REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS
+                    if category == REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY else category)
+
+        def display_detail(category, detail):
+            if detail and category == REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY:
+                return detail.replace("; release ID ", "; artist release ID ")
+            if detail and category == REQUEST_CATEGORY_ARTIST_RELEASES:
+                return detail.replace("; release types: ", "; artist release types: ")
+            return detail
+
         return {
             "requests": total["requests"] if total else 0,
             "errors": total["errors"] if total else 0,
             "first_quota": {
                 "number": total["first_quota_number"],
-                "category": total["first_quota_category"],
+                "category": display_category(total["first_quota_category"]),
                 "category_number": total["first_quota_category_number"],
                 "started": total["first_quota_at"],
-                "detail": total["first_quota_detail"],
+                "detail": display_detail(total["first_quota_category"], total["first_quota_detail"]),
             } if total and total["first_quota_number"] is not None else None,
-            "categories": [dict(row) for row in categories],
+            "categories": sorted(
+                ({**dict(row), "category": display_category(row["category"])} for row in categories),
+                key=lambda row: row["category"],
+            ),
         }
 
     def clear_data(self):
@@ -240,7 +264,8 @@ class Store:
         # Keep older entries in SQLite; the web UI only needs the most recent ones.
         with self.connect() as db:
             return [dict(row) for row in db.execute(
-                "SELECT started, status, detail FROM history ORDER BY id DESC LIMIT ?",
+                "SELECT started, status, detail, api_requests, token_requests, cache_hits "
+                "FROM history ORDER BY id DESC LIMIT ?",
                 (HISTORY_ENTRY_LIMIT,),
             )]
 
@@ -263,6 +288,13 @@ class Store:
         with self.connect() as db:
             db.execute(
                 "UPDATE history SET status=?,detail=? WHERE id=?", (status, detail, history_id)
+            )
+
+    def save_request_stats(self, history_id, stats):
+        with self.connect() as db:
+            db.execute(
+                "UPDATE history SET api_requests=?, token_requests=?, cache_hits=? WHERE id=?",
+                (stats.api_requests, stats.token_requests, stats.cache_hits, history_id),
             )
 
     def used_episodes(self):

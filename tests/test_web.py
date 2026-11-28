@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 temp = tempfile.TemporaryDirectory()
 os.environ["DAILY_DRIVE_DB"] = os.path.join(temp.name, "web.sqlite")
 from app import web
+from app.request_stats import RefreshRequestStats
 from app.store import Store
 
 
@@ -102,6 +103,16 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"No requests recorded today.", response.data)
         self.assertIn(b"No quota or rate-limit error recorded today.", response.data)
 
+    def test_request_overview_uses_artist_release_name_for_existing_counts(self):
+        store = self.isolated_store()
+        started = datetime.now().astimezone()
+        info = store.start_request("Release tracks", started, "Read; release ID album123")
+        store.fail_request(info, quota=True)
+        response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b"<td>Artist release tracks</td><td>1</td><td>1</td>", response.data)
+        self.assertIn(b"artist release ID album123", response.data)
+        self.assertNotIn(b"<td>Release tracks</td>", response.data)
+
     def test_history_displays_rate_limit_retry_after(self):
         entry = {"started": "2026-01-01", "status": "failed",
                  "detail": "Spotify GET /me/top/artists failed (HTTP 429); "
@@ -111,6 +122,19 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"HTTP 429", response.data)
         self.assertIn(b"Message: quota &lt;exceeded&gt;; Reason: QUOTA_EXCEEDED", response.data)
         self.assertIn(b"Retry-After: &#39;45&#39;", response.data)
+
+    def test_history_shows_available_request_stats_without_inventing_old_counts(self):
+        store = self.isolated_store()
+        store.finish(store.start(), "failed", "old entry")
+        entry_id = store.start()
+        store.finish(entry_id, "succeeded", "new entry")
+        store.save_request_stats(entry_id, RefreshRequestStats(12, 1, 3))
+        store.start()
+
+        html = self.client.get("/", environ_overrides=self.remote).data.decode()
+        self.assertIn("Spotify API requests: 12;\ntoken requests: 1; cache hits: 3.", html)
+        self.assertEqual(html.count("Spotify API requests:"), 1)
+        self.assertIn("old entry", html)
 
     def test_failed_history_displays_cache_origins(self):
         entry = {"started": "2026-01-01", "status": "failed",
@@ -135,6 +159,79 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"Liked tracks: Spotify fetch failed; reused cache from 2025-12-31.", response.data)
         self.assertIn(b"HTTP 429", response.data)
         self.assertIn(b"Retry-After: &#39;45&#39;", response.data)
+
+    def test_successful_history_status_counts_source_errors_not_episode_shortfalls(self):
+        store = self.isolated_store()
+        entries = [
+            ("succeeded", "clean\nSelection:\nSource warning: Show news has 0 of 1 requested playable episodes"),
+            ("succeeded", "single\nSelection:\n"
+             "Source error: Failed to fetch remaining episodes for show news: unavailable\n"
+             "Source warning: Show news has 0 of 1 requested playable episodes"),
+            ("succeeded", "multiple\nSelection:\n"
+             "Source warning: Skipping short-term top tracks: unavailable\n"
+             "Source error: Skipping artist releases for artist favorite: unavailable "
+             "(during an earlier discovery fetch today)"),
+            ("failed", "failed detail\nSelection:\nSource warning: Skipping liked tracks: unavailable"),
+            ("uncertain", "uncertain detail\nSelection:\nSource warning: Skipping liked tracks: unavailable"),
+        ]
+        for status, detail in entries:
+            store.finish(store.start(), status, detail)
+
+        response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b"<td>succeeded</td><td>clean", response.data)
+        self.assertIn(b"<td>succeeded (1 error)</td><td>single", response.data)
+        self.assertIn(b"<td>succeeded (2 errors)</td><td>multiple", response.data)
+        self.assertIn(b"<td>failed</td><td>failed detail", response.data)
+        self.assertIn(b"<td>uncertain</td><td>uncertain detail", response.data)
+        self.assertIn(b"Source warning: Show news has 0 of 1 requested playable episodes", response.data)
+        self.assertIn(b"Source error: Skipping short-term top tracks: unavailable", response.data)
+        self.assertNotIn(b"Source warning: Skipping short-term top tracks", response.data)
+        self.assertTrue(all(entry["status"] in ("succeeded", "failed", "uncertain")
+                            for entry in Store(store.path).history()))
+
+    def test_history_links_cached_discovery_failures_to_earlier_warning(self):
+        entry = {
+            "started": "2026-01-01",
+            "status": "succeeded",
+            "detail": (
+                "90 minutes\nSelection:\n"
+                "Discovery tracks: reused from today's cache; the earlier discovery fetch encountered errors; "
+                "0 artist tracks and 0 collaborator tracks; no artist release or artist release track requests "
+                "during this refresh.\n"
+                "Selected music by candidate group (duplicates credited to the first group): "
+                "artist discoveries: 0 (no candidates because source retrieval failed).\n"
+                "Source error: Skipping artist releases for artist favorite: Spotify failed "
+                "(during an earlier discovery fetch today)"
+            ),
+        }
+        with patch.object(web.store, "history", return_value=[entry]):
+            response = self.client.get("/", environ_overrides=self.remote)
+        self.assertIn(b'<a href="#history-0-error-2">no candidates because source retrieval failed</a>',
+                      response.data)
+        self.assertIn(b'during an earlier discovery fetch today', response.data)
+
+    def test_old_artist_release_warning_still_links_from_history(self):
+        old_warnings = (
+            "Skipping releases for artist favorite: Spotify failed",
+            "Combined release lookup for artist favorite failed",
+            "Skipping release at position 1 for artist favorite",
+        )
+        for warning in old_warnings:
+            with self.subTest(warning=warning):
+                entry = {
+                    "started": "2026-01-01",
+                    "status": "succeeded",
+                    "detail": (
+                        "90 minutes\nSelection:\n"
+                        "Selected music by candidate group: artist discoveries: 0 "
+                        "(no candidates because source retrieval failed).\n"
+                        f"Source warning: {warning}"
+                    ),
+                }
+                with patch.object(web.store, "history", return_value=[entry]):
+                    response = self.client.get("/", environ_overrides=self.remote)
+                self.assertIn(b'<a href="#history-0-error-1">no candidates because source retrieval failed</a>',
+                              response.data)
 
     def test_history_links_zero_result_errors_to_source_warnings(self):
         entry = {
@@ -213,6 +310,7 @@ class WebTests(unittest.TestCase):
         data = {"csrf": web.csrf, "client_id": "a" * 32, "target": "0" * 22,
                 "market": "us", "timezone": "Asia/Tokyo"}
         store.set_cached("liked_tracks_cache", "2026-01-01", ["old"])
+        store.set_cached("discovery_tracks_cache", "2026-01-01", {"discoveries": ["old"]})
         store.start_request("Liked tracks", datetime(2026, 1, 1, tzinfo=timezone.utc), "Read")
         response = self.client.post("/configure", data=data, environ_overrides=self.remote)
         self.assertEqual(response.status_code, 200)
@@ -220,6 +318,7 @@ class WebTests(unittest.TestCase):
         self.assertIn(b'name="market" required maxlength="2" value="US"', response.data)
         self.assertIn(b'name="timezone" required value="Asia/Tokyo"', response.data)
         self.assertIsNone(store.get_cached("liked_tracks_cache", "2026-01-01"))
+        self.assertIsNone(store.get_cached("discovery_tracks_cache", "2026-01-01"))
         self.assertEqual(store.request_overview("2026-01-01")["requests"], 0)
         self.assertEqual(store.get("refresh_token"), "saved")
         self.assertIsNotNone(store.get("followed_artists_cache"))
