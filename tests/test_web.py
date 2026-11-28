@@ -35,7 +35,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'<html lang="en">', response.data)
         self.assertIn(b"Connect Spotify", response.data)
-        self.assertIn(b"06:00, 10:00, 14:00, 18:00, 22:00", response.data)
+        self.assertIn(b"08:15, 12:15, 16:15, 20:15", response.data)
         self.assertEqual(self.client.post("/refresh", environ_overrides=self.remote).status_code, 403)
 
     def test_automatic_refresh_can_be_toggled_and_is_persistent(self):
@@ -519,38 +519,36 @@ class WebTests(unittest.TestCase):
         self.assertEqual(store.used_episodes(), {"episode"})
         self.assertEqual(len(store.history()), 1)
 
-    def test_scheduler_runs_five_times_in_amsterdam_time(self):
+    def test_scheduler_runs_four_times_in_amsterdam_time(self):
         amsterdam = ZoneInfo("Europe/Amsterdam")
         self.isolated_store().set_many({"timezone": "Europe/Amsterdam"})
 
         for date in ((2026, 1, 15), (2026, 7, 15)):
             with self.subTest(date=date):
                 local_times = [datetime(*date, hour, 0, 0, tzinfo=amsterdam) for hour in range(24)]
-                local_times += [
-                    datetime(*date, 8, 1, tzinfo=amsterdam),
-                    datetime(*date, 20, 59, tzinfo=amsterdam),
-                ]
+                local_times += [datetime(*date, hour, minute, tzinfo=amsterdam)
+                                for hour in (8, 12, 16, 20) for minute in (14, 15, 16)]
                 utc_times = [value.astimezone(timezone.utc) for value in local_times]
 
                 with patch("app.web.datetime") as clock, patch("app.web.run_refresh") as run, \
-                     patch("app.web.time.sleep", side_effect=[None] * 25 + [StopIteration]):
+                     patch("app.web.time.sleep", side_effect=[None] * 35 + [StopIteration]):
                     clock.now.side_effect = lambda tz: utc_times.pop(0).astimezone(tz)
                     with self.assertRaises(StopIteration):
                         web.scheduler()
 
                 self.assertEqual(run.call_args_list, [
-                    call(f"{date[0]:04}-{date[1]:02}-{date[2]:02} {hour:02}:00")
-                    for hour in (6, 10, 14, 18, 22)
+                    call(f"{date[0]:04}-{date[1]:02}-{date[2]:02} {hour:02}:15")
+                    for hour in (8, 12, 16, 20)
                 ])
-                self.assertEqual(clock.now.call_count, 26)
+                self.assertEqual(clock.now.call_count, 36)
                 self.assertTrue(all(c.args[0] == timezone.utc for c in clock.now.call_args_list))
 
     def test_scheduler_uses_timezone_changes_without_restart(self):
         store = self.isolated_store()
         store.set_many({"timezone": "UTC"})
         utc_times = [
-            datetime(2026, 1, 15, 6, tzinfo=timezone.utc),
-            datetime(2026, 1, 15, 21, tzinfo=timezone.utc),
+            datetime(2026, 1, 15, 8, 15, tzinfo=timezone.utc),
+            datetime(2026, 1, 15, 23, 15, tzinfo=timezone.utc),
         ]
 
         def change_timezone(key):
@@ -562,7 +560,7 @@ class WebTests(unittest.TestCase):
             clock.now.side_effect = lambda tz: utc_times.pop(0)
             with self.assertRaises(StopIteration):
                 web.scheduler()
-        self.assertEqual(run.call_args_list, [call("2026-01-15 06:00"), call("2026-01-16 06:00")])
+        self.assertEqual(run.call_args_list, [call("2026-01-15 08:15"), call("2026-01-16 08:15")])
 
     def test_scheduler_skips_disabled_runs_and_responds_to_enabling(self):
         store = self.isolated_store()
@@ -578,10 +576,10 @@ class WebTests(unittest.TestCase):
 
         with patch("app.web.datetime") as clock, patch("app.web.run_refresh") as run, \
              patch("app.web.time.sleep", side_effect=sleep):
-            clock.now.return_value = datetime(2026, 1, 15, 6, tzinfo=timezone.utc)
+            clock.now.return_value = datetime(2026, 1, 15, 8, 15, tzinfo=timezone.utc)
             with self.assertRaises(StopIteration):
                 web.scheduler()
-        run.assert_called_once_with("2026-01-15 06:00")
+        run.assert_called_once_with("2026-01-15 08:15")
         self.assertEqual(clock.now.call_count, 1)
 
 

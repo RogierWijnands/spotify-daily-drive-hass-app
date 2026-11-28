@@ -53,7 +53,7 @@ csrf = secrets.token_urlsafe(SECURE_TOKEN_ENTROPY_BYTES)
 # OAuth state is transient; refresh.lock protects account changes during a refresh.
 oauth = {}
 oauth_lock = threading.Lock()
-REFRESH_TIMES = ("06:00", "10:00", "14:00", "18:00", "22:00")
+REFRESH_TIMES = ("08:15", "12:15", "16:15", "20:15")
 
 # Failures are linked only to the selection groups they could have emptied.
 GROUP_ERROR_SOURCES = MUSIC_GROUP_SOURCES

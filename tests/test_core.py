@@ -2442,7 +2442,7 @@ class RefreshTests(unittest.TestCase):
         api.playlist_items.return_value = ["old"]
         with patch("app.refresh.Spotify", return_value=api) as spotify, \
              patch("app.refresh.build", return_value=(["new"], [], "90 minutes")):
-            self.service.run("2026-01-01 06:00")
+            self.service.run("2026-01-01 08:15")
             spotify.assert_not_called()
             self.assertEqual(self.store.history(), [])
 
@@ -2451,7 +2451,7 @@ class RefreshTests(unittest.TestCase):
             api.replace.assert_called_once_with("target", ["new"])
 
             self.store.set_many({"automatic_refresh_enabled": True})
-            self.service.run("2026-01-01 06:00")
+            self.service.run("2026-01-01 08:15")
             self.assertEqual(len(self.store.history()), 2)
 
     def test_success_updates_history_and_used_episodes(self):
