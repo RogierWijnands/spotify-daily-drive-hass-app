@@ -27,12 +27,13 @@ from .constants import (
     SHOW_SOURCE_PREFIX, SOURCE_CACHED_PREFIX, SOURCE_ERROR_PREFIX, SOURCE_FOLLOWED_ARTISTS, SOURCE_LIKED_TRACKS,
     SOURCE_LONG_TERM_TOP_TRACKS, SOURCE_MEDIUM_TERM_TOP_TRACKS, SOURCE_PARTIAL_PREFIX,
     SOURCE_PLAYLISTS, SOURCE_RECENT_TRACKS, SOURCE_SHORT_TERM_TOP_TRACKS, SOURCE_SKIP_PREFIX,
-    SOURCE_TOP_ARTISTS, SPOTIFY_CLIENT_ID_LENGTH, SHORT_TERM,
-    TOP_TIME_RANGE_LABELS, WEB_REFRESH_ALREADY_RUNNING_MESSAGE,
+    SOURCE_TOP_ARTISTS, SOURCE_WARNING_PREFIX, SPOTIFY_CLIENT_ID_LENGTH, SHORT_TERM,
+    TOP_TIME_RANGE_LABELS, TRACKS_DETAIL_SEPARATOR, WEB_REFRESH_ALREADY_RUNNING_MESSAGE,
     ZERO_ARTIST_RELEASE_LISTS_ERROR, ZERO_FETCH_RESULTS, ZERO_FOLLOWED_ARTISTS_ERROR,
     ZERO_SHOW_EPISODES_ERROR,
 )
 from .refresh import Refresh
+from .selection import is_source_error
 from .shows import format_show_lines, parse_show_lines, validate_shows
 from .spotify import (
     REDIRECT_URI, SpotifyError, authorization, callback_code, playlist_id, token_request,
@@ -59,7 +60,7 @@ GROUP_ERROR_SOURCES = MUSIC_GROUP_SOURCES
 
 
 def _warning_matches_source(warning, source):
-    detail = warning.removeprefix(SOURCE_ERROR_PREFIX)
+    detail = warning.removeprefix(SOURCE_WARNING_PREFIX).removeprefix(SOURCE_ERROR_PREFIX)
     if source == ARTIST_RELEASE_SOURCE:
         return detail.startswith(ARTIST_RELEASE_ERROR_PREFIXES)
     if source == SOURCE_PLAYLISTS:
@@ -124,7 +125,7 @@ def _selection_lines_with_links(lines, entry_index):
     warning_ids = {
         index: f"history-{entry_index}-error-{index}"
         for index, line in enumerate(lines)
-        if line.startswith(SOURCE_ERROR_PREFIX)
+        if line.startswith((SOURCE_WARNING_PREFIX, SOURCE_ERROR_PREFIX))
     }
     warnings = [(index, lines[index]) for index in warning_ids]
     rendered = []
@@ -192,6 +193,8 @@ def home(message=None, status=HTTPStatus.OK):
     history = history[:history_limit]
     for entry_index, entry in enumerate(history):
         summary, separator, items = entry["detail"].partition(ITEMS_DETAIL_SEPARATOR)
+        if not separator:
+            summary, separator, items = entry["detail"].partition(TRACKS_DETAIL_SEPARATOR)
         summary, selection_separator, selection = summary.partition(SELECTION_DETAIL_SEPARATOR)
         selection_lines = selection.splitlines() if selection_separator else []
         outcome = next(
@@ -202,12 +205,23 @@ def home(message=None, status=HTTPStatus.OK):
         selection_lines = [line for line in selection_lines if not line.startswith(HISTORY_OUTCOME_PREFIX)]
         entry["summary"] = summary
 
+        error_count = 0
+        display_lines = []
+        for line in selection_lines:
+            if line.startswith((SOURCE_WARNING_PREFIX, SOURCE_ERROR_PREFIX)):
+                detail = line.removeprefix(SOURCE_WARNING_PREFIX).removeprefix(SOURCE_ERROR_PREFIX)
+                if is_source_error(detail):
+                    error_count += 1
+                    line = SOURCE_ERROR_PREFIX + detail
+            display_lines.append(line)
         entry["display_status"] = entry["status"]
         entry["status_class"] = entry["status"]
-        if entry["status"] == HISTORY_STATUS_SUCCEEDED and outcome:
-            entry["display_status"] = outcome
+        if entry["status"] == HISTORY_STATUS_SUCCEEDED and (outcome or error_count):
+            entry["display_status"] = outcome or (
+                f"error ({error_count} source error{'s' if error_count != 1 else ''}; see details)"
+            )
             entry["status_class"] = "error"
-        entry["selection"] = _selection_lines_with_links(selection_lines, entry_index)
+        entry["selection"] = _selection_lines_with_links(display_lines, entry_index)
         entry["items_list"] = items.splitlines() if separator else []
         entry["request_stats"] = (
             {key: entry[key] for key in ("api_requests", "token_requests", "cache_hits")}

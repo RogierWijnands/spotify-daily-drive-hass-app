@@ -18,7 +18,7 @@ Combine Spotify music, discoveries, artist releases, news and podcasts in one pl
 - **Shows:** enter one Spotify show URL or ID and episode count per line, such as `https://open.spotify.com/show/SHOW_ID, 4`. Each show may appear once; the combined count is at most 99. Leave both show fields empty for music only.
 - **Source playlists:** use playlists you own or collaborate on. Copies of Discover Weekly or Release Radar can be used, but do not update automatically.
 - Changing market or timezone clears caches; changing timezone also clears daily request statistics. Changing Spotify client ID clears caches and disconnects Spotify. Resolve an uncertain playlist change before changing market.
-- **Updates and storage:** use **Check for updates** in the app store. Tokens, settings, caches and history are private in `/data/daily_drive.sqlite3`; removing app data deletes them. Repository and local installations have separate data.
+- **Updates and storage:** use **Check for updates** in the app store; existing settings, caches and history are retained. Data is private in `/data/daily_drive.sqlite3`; removing app data deletes it. Repository and local installations have separate data.
 
 ## Playlist and cache
 

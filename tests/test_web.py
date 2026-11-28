@@ -374,6 +374,28 @@ class WebTests(unittest.TestCase):
         self.assertIn('<td>uncertain</td><td>detail uncertain', html)
         self.assertNotIn("Refresh outcome:", html)
 
+    def test_existing_history_preserves_status_error_links_and_track_list(self):
+        store = self.isolated_store()
+        history_id = store.start()
+        store.prepare(
+            history_id, "target", [], ["track1"], [],
+            "90 minutes\nSelection:\n"
+            "Selected music by candidate group: artist discoveries: 0 "
+            "(no candidates because source retrieval failed).\n"
+            "Source warning: Skipping releases for artist favorite: Spotify failed\n"
+            "Source warning: Show news has 0 of 1 requested playable episodes\n"
+            "Tracks:\nArtist - Song",
+        )
+        store.resolve(True)
+
+        html = self.client.get("/", environ_overrides=self.remote).data.decode()
+        self.assertIn("<td>error (1 source error; see details)</td>", html)
+        self.assertIn('<a href="#history-0-error-1">no candidates because source retrieval failed</a>', html)
+        self.assertIn("Source error: Skipping releases for artist favorite: Spotify failed", html)
+        self.assertIn("Source warning: Show news has 0 of 1 requested playable episodes", html)
+        self.assertIn("<details><summary>Show playlist items</summary><ol>", html)
+        self.assertIn("<li>Artist - Song</li>", html)
+
     def test_confirmed_playlist_retains_recorded_error_outcome(self):
         store = self.isolated_store()
         entry = store.start()

@@ -523,6 +523,7 @@ class Spotify:
                 "completed_day": None,
             },
         )
+        state.pop("last_error", None)
         cached_ids = set(state["artists"])
         fetched_ids = set()
         attempted = False

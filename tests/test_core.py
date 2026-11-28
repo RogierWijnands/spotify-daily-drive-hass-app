@@ -1554,19 +1554,42 @@ class SpotifyTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.store = Store(os.path.join(directory.name, "requests.sqlite"))
 
-    def test_incomplete_discovery_cache_is_rejected(self):
+    def test_existing_discovery_cache_without_fallback_fields_builds_playlist(self):
         api = Spotify.__new__(Spotify)
         api.store = self.store
         api.get = Mock(return_value={"items": []})
         api.followed_artists = Mock(return_value=[])
         api.liked_tracks = Mock(return_value=[])
-        day = datetime.now().astimezone().date().isoformat()
-        self.store.set_cached("discovery_tracks_cache", day, {
-            "discoveries": [], "collaborators": [], "issues": [], "selection": [],
-            "fallback_day": None,
-        })
-        with self.assertRaisesRegex(SpotifyError, "Invalid cached discovery tracks"):
-            music_candidates(api, [], random.Random(1))
+        day = current_time(self.store, datetime).date().isoformat()
+        discoveries = [{"id": str(i), "type": "track", **track(i)} for i in range(23)]
+        cache = {
+            "discoveries": discoveries, "collaborators": [],
+            "issues": ["Skipping releases for artist favorite: Spotify failed"], "selection": [],
+        }
+        self.store.set_cached("discovery_tracks_cache", day, cache)
+
+        uris, episodes, detail = build(api, [], [], [], random.Random(1))
+
+        self.assertTrue(uris)
+        self.assertEqual(episodes, [])
+        self.assertIn("Refresh outcome: error (music source error", detail)
+        self.assertIn("collaborators: 0 (no candidates because source retrieval failed)", detail)
+        self.assertEqual(self.store.get_cached("discovery_tracks_cache", day), cache)
+
+    def test_invalid_discovery_fallback_fields_are_rejected(self):
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.get = Mock(return_value={"items": []})
+        api.followed_artists = Mock(return_value=[])
+        api.liked_tracks = Mock(return_value=[])
+        day = current_time(self.store, datetime).date().isoformat()
+        for field, value in (("fallback_day", 42), ("fallback_uris", ["valid", 42])):
+            with self.subTest(field=field):
+                cache = {"discoveries": [], "collaborators": [], "issues": [], "selection": []}
+                cache[field] = value
+                self.store.set_cached("discovery_tracks_cache", day, cache)
+                with self.assertRaises(SpotifyError):
+                    music_candidates(api, [], random.Random(1))
 
     def test_artist_release_track_requests_keep_their_numbering(self):
         started = datetime.now().astimezone()
@@ -1587,6 +1610,14 @@ class SpotifyTests(unittest.TestCase):
         self.assertEqual(overview["first_quota"]["category"], "Artist release tracks")
         self.assertEqual(overview["first_quota"]["category_number"], 2)
         self.assertEqual(overview["first_quota"]["detail"], "Read; artist release ID album123")
+
+    def test_existing_artist_release_quota_details_keep_display_labels(self):
+        started = datetime.now().astimezone()
+        info = self.store.start_request("Release tracks", started, "Read; release ID album123")
+        self.store.fail_request(info, quota=True)
+        first_quota = Store(self.store.path).request_overview(started.date().isoformat())["first_quota"]
+        self.assertEqual(first_quota["category"], "Artist release tracks")
+        self.assertEqual(first_quota["detail"], "Read; artist release ID album123")
 
     def test_daily_discovery_cache_limits_requests_and_keeps_partial_results(self):
         class FixedRandom(random.Random):
@@ -2315,6 +2346,9 @@ class SpotifyTests(unittest.TestCase):
                 clock.now.return_value = datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc)
                 with self.assertRaisesRegex(SpotifyError, "Retry-After: '172'"):
                     api.followed_artists()
+                state = api.store.get("followed_artists_cache")
+                state["last_error"] = "previous error; Retry-After: '172'"
+                api.store.set_many({"followed_artists_cache": state})
                 clock.now.return_value = datetime(2026, 1, 15, 10, 5, tzinfo=timezone.utc)
                 for _ in range(2):
                     trace = []
@@ -2332,6 +2366,7 @@ class SpotifyTests(unittest.TestCase):
                 clock.now.return_value = datetime(2026, 1, 16, 10, 0, tzinfo=timezone.utc)
                 self.assertEqual(len(api.followed_artists()), 5)
                 self.assertEqual(api.get.call_count, 6)
+                self.assertNotIn("last_error", api.store.get("followed_artists_cache"))
 
     def test_invalid_followed_artist_cursor_fails(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2524,22 +2559,18 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.store.history()[0]["status"], "succeeded")
         self.assertIsNone(self.store.history()[0]["api_requests"])
 
-    def test_incomplete_history_schema_is_rejected_without_modification(self):
+    def test_existing_history_schema_is_upgraded_without_losing_data(self):
         path = os.path.join(self.temp.name, "incomplete.sqlite")
         with sqlite3.connect(path) as db:
             db.execute("CREATE TABLE history (id INTEGER PRIMARY KEY, started TEXT NOT NULL, "
                        "status TEXT NOT NULL, detail TEXT NOT NULL, scheduled_key TEXT UNIQUE)")
             db.execute("INSERT INTO history (started, status, detail) VALUES (?, ?, ?)",
                        ("2026-01-01", "succeeded", "saved"))
-        with self.assertRaisesRegex(sqlite3.OperationalError, "no such column"):
-            Store(path)
-        with sqlite3.connect(path) as db:
-            self.assertEqual(db.execute("SELECT detail FROM history").fetchone()[0], "saved")
-            self.assertNotIn("api_requests", {row[1] for row in db.execute("PRAGMA table_info(history)")})
-            self.assertEqual(
-                [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")],
-                ["history"],
-            )
+        entry = Store(path).history()[0]
+        self.assertEqual(entry["detail"], "saved")
+        self.assertEqual((entry["api_requests"], entry["token_requests"], entry["cache_hits"]),
+                         (None, None, None))
+        self.assertEqual(Store(path).history()[0]["detail"], "saved")
 
     def test_reopening_current_storage_preserves_history_and_settings(self):
         self.store.set_many({"client_id": "client"})

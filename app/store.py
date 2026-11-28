@@ -12,7 +12,7 @@ from .constants import (
     DISCOVERY_TRACKS_CACHE_KEY,
     HISTORY_ENTRY_LIMIT, HISTORY_STATUS_FAILED, HISTORY_STATUS_IN_PROGRESS,
     HISTORY_STATUS_SUCCEEDED, HISTORY_STATUS_UNCERTAIN, ITEMS_DETAIL_SEPARATOR,
-    NO_UNCERTAIN_CHANGE_ERROR, REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS,
+    NO_UNCERTAIN_CHANGE_ERROR, REQUEST_CATEGORY_ARTIST_RELEASES, REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS,
     REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY,
     SELECTION_DETAIL_SEPARATOR,
 )
@@ -51,13 +51,6 @@ class Store:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.path = path
         with self.connect() as db:
-            if db.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='history'"
-            ).fetchone():
-                db.execute(
-                    "SELECT id, started, status, detail, scheduled_key, "
-                    "api_requests, token_requests, cache_hits FROM history LIMIT 0"
-                )
             # Keep configuration, library caches, refresh history and pending writes separate.
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -92,6 +85,11 @@ class Store:
                     PRIMARY KEY (day, category)
                 );
             """)
+            history_columns = {row["name"] for row in db.execute("PRAGMA table_info(history)")}
+            for column in ("api_requests", "token_requests", "cache_hits"):
+                if column not in history_columns:
+                    db.execute(f"ALTER TABLE history ADD COLUMN {column} INTEGER")
+
             # Only a persisted pending write could have reached Spotify before a restart.
             db.execute(
                 """
@@ -275,6 +273,13 @@ class Store:
             return (REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS
                     if category == REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY else category)
 
+        def display_detail(category, detail):
+            if detail and category == REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY:
+                return detail.replace("; release ID ", "; artist release ID ")
+            if detail and category == REQUEST_CATEGORY_ARTIST_RELEASES:
+                return detail.replace("; release types: ", "; artist release types: ")
+            return detail
+
         return {
             "requests": total["requests"] if total else 0,
             "errors": total["errors"] if total else 0,
@@ -283,7 +288,7 @@ class Store:
                 "category": display_category(total["first_quota_category"]),
                 "category_number": total["first_quota_category_number"],
                 "started": total["first_quota_at"],
-                "detail": total["first_quota_detail"],
+                "detail": display_detail(total["first_quota_category"], total["first_quota_detail"]),
             } if total and total["first_quota_number"] is not None else None,
             "categories": sorted(
                 ({**dict(row), "category": display_category(row["category"])} for row in categories),

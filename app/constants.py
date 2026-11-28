@@ -148,6 +148,9 @@ ARTIST_RELEASE_ERROR_PREFIXES = (
     SKIP_ARTIST_RELEASES_PREFIX,
     COMBINED_ARTIST_RELEASE_LOOKUP_PREFIX,
     SKIP_ARTIST_RELEASE_POSITION_PREFIX,
+    "Skipping releases for artist ",
+    "Combined release lookup for artist ",
+    "Skipping release at position ",
 )
 PLAYLIST_SOURCE_ERROR_PREFIXES = tuple(
     prefix + SOURCE_PLAYLISTS + " "
@@ -170,3 +173,4 @@ HISTORY_ERROR_MARKERS = (
 
 SELECTION_DETAIL_SEPARATOR = "\nSelection:\n"
 ITEMS_DETAIL_SEPARATOR = "\nItems:\n"
+TRACKS_DETAIL_SEPARATOR = "\nTracks:\n"
