@@ -358,7 +358,8 @@ class Spotify:
     def daily_cached(self, key, fetch, trace=None):
         day = current_time(self.store, datetime).date().isoformat()
         cached = self.store.get_cached(key, day)
-        label = key.removesuffix(CACHE_KEY_SUFFIX).replace("_", " ").capitalize()
+        label = key.removesuffix(CACHE_KEY_SUFFIX).replace("_", " ")
+        label = label[:1].upper() + label[1:]
 
         # An empty list is a valid hit; only cache after a complete fetch.
         if cached is not None:

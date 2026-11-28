@@ -113,6 +113,17 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"artist release ID album123", response.data)
         self.assertNotIn(b"<td>Release tracks</td>", response.data)
 
+    def test_history_links_source_playlist_error_to_matching_playlist(self):
+        entry = {"started": "2026-01-01", "status": "succeeded",
+                 "detail": "90 minutes\nSelection:\n"
+                           "Source playlist AbC: Spotify fetch failed; no data retrieved from cache; "
+                           "0 results because the fetch failed.\n"
+                           "Source error: Skipping playlist Other: unavailable\n"
+                           "Source error: Skipping playlist AbC: unavailable"}
+        with patch.object(web.store, "history", return_value=[entry]):
+            html = self.client.get("/", environ_overrides=self.remote).data.decode()
+        self.assertIn('<a href="#history-0-error-2">0 results because the fetch failed</a>', html)
+
     def test_history_displays_rate_limit_retry_after(self):
         entry = {"started": "2026-01-01", "status": "failed",
                  "detail": "Spotify GET /me/top/artists failed (HTTP 429); "

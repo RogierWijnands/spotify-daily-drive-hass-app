@@ -19,7 +19,7 @@ from .constants import (
     SHOW_EPISODE_SHORTFALL_SUFFIX, SHOW_HISTORY_SEPARATOR,
     SHORT_TERM, SKIP_ARTIST_RELEASES_PREFIX, SKIP_ARTIST_RELEASE_POSITION_PREFIX, SOURCE_CACHED_PREFIX,
     SOURCE_FOLLOWED_ARTISTS, SOURCE_LIKED_TRACKS, SOURCE_LONG_TERM_TOP_TRACKS,
-    SOURCE_MEDIUM_TERM_TOP_TRACKS, SOURCE_PARTIAL_PREFIX, SOURCE_PLAYLISTS,
+    SOURCE_MEDIUM_TERM_TOP_TRACKS, SOURCE_PARTIAL_PREFIX, SOURCE_PLAYLISTS, SOURCE_PLAYLIST_CACHE_PREFIX,
     SOURCE_RECENT_TRACKS,
     SOURCE_ERROR_PREFIX, SOURCE_SHORT_TERM_TOP_TRACKS, SOURCE_SKIP_PREFIX, SOURCE_TOP_ARTISTS,
     SOURCE_WARNING_PREFIX,
@@ -328,9 +328,13 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None):
     for pid in playlist_ids:
         entries = get_api_items(
             f"{SOURCE_PLAYLISTS} {pid}",
-            lambda: api.pages(
-                SPOTIFY_PLAYLIST_ITEMS_PATH.format(playlist_id=pid),
-                {"additional_types": TRACK_TYPE, "market": api.market},
+            lambda: api.daily_cached(
+                f"{SOURCE_PLAYLIST_CACHE_PREFIX}{pid}{CACHE_KEY_SUFFIX}",
+                lambda: api.pages(
+                    SPOTIFY_PLAYLIST_ITEMS_PATH.format(playlist_id=pid),
+                    {"additional_types": TRACK_TYPE, "market": api.market},
+                ),
+                trace=trace,
             ),
             issues,
         )

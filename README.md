@@ -49,6 +49,7 @@ https://open.spotify.com/show/3Ab6DGFJL7VE5ToIH4r6w1, 1
 ## Cache and source errors
 
 - **Tracks and top artists:** top tracks are cached daily per time range; one top-artist range is chosen and cached daily. Recently played tracks and up to five randomly selected liked-track pages (50 tracks each) are also cached daily. If a source fails without data, its last cache can be reused, even from a previous day. Incomplete liked-track results are not cached.
+- **Source playlists:** each is cached per local day, so changes appear the next day. On errors, partial results are not cached; if no results are fetched, an older cache can be reused. The target playlist is still read every refresh.
 - **Followed artists:** stored persistently and scanned up to five pages per day, continuing from the previous cursor. A new scan starts on a later day after the last page; unfollowed artists are removed when that scan completes. Errors preserve scan progress and cached artists.
 - **Discoveries:** once per local day, search up to eight artists and four collaborators, choosing up to two random artist releases per artist. Cache the resulting tracks, including partial or empty results after errors, for the rest of the day. Changes to the artist pool take effect on the next day's search. Additional pages and fallback lookups may require extra requests.
 - **Episodes:** if a show fetch fails, playable episodes fetched earlier that local day can fill missing slots; fresh episodes take priority.

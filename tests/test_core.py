@@ -1095,6 +1095,127 @@ class SelectionTests(unittest.TestCase):
             self.assertIn("Recently played tracks: retrieved from today's cache.", traces[1])
             self.assertIn("Recently played tracks: retrieved from Spotify and saved in today's cache.", traces[4])
 
+    def test_source_playlists_are_cached_separately_per_local_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class Fake(Spotify):
+                def __init__(self):
+                    self.store = Store(os.path.join(directory, "cache.sqlite"))
+                    self.calls = []
+
+                def get(self, path, **params):
+                    self.calls.append((path, params))
+                    if path.startswith("/playlists/"):
+                        pid = path.split("/")[2]
+                        if pid == "Empty":
+                            return {"items": [], "next": None}
+                        offset = params["offset"]
+                        item = track(f"{pid}-{offset}")
+                        item["id"] = f"{pid}-{offset}"
+                        item["type"] = "track"
+                        return {"items": [{"item": item}], "next": "next" if offset == 0 else None}
+                    return {"items": []}
+
+                def liked_tracks(self, rng):
+                    return []
+
+                def followed_artists(self, trace=None):
+                    return []
+
+            api = Fake()
+            stats = RefreshRequestStats()
+            token = current_refresh_stats.set(stats)
+            self.addCleanup(current_refresh_stats.reset, token)
+            with patch("app.spotify.datetime") as clock:
+                clock.now.return_value = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+                trace = []
+                first = music_candidates(api, ["AbC", "Empty"], random.Random(1), trace=trace)
+                self.assertEqual({item["id"] for item in first[3]}, {"AbC-0", "AbC-1"})
+                self.assertIn("Source playlist AbC: retrieved from Spotify and saved in today's cache.", trace)
+                self.assertEqual(stats.cache_hits, 0)
+                api.store = Store(api.store.path)
+                trace = []
+                second = music_candidates(api, ["Empty", "AbC", "New"], random.Random(2), trace=trace)
+                self.assertEqual({item["id"] for item in second[3]}, {"AbC-0", "AbC-1", "New-0", "New-1"})
+                self.assertIn("Source playlist AbC: retrieved from today's cache.", trace)
+                self.assertIn("Source playlist Empty: retrieved from today's cache.", trace)
+                self.assertEqual(sum(path == "/playlists/AbC/items" for path, _ in api.calls), 2)
+                self.assertEqual(sum(path == "/playlists/Empty/items" for path, _ in api.calls), 1)
+                self.assertEqual(sum(path == "/playlists/New/items" for path, _ in api.calls), 2)
+                self.assertEqual(stats.cache_hits, 9)
+
+                clock.now.return_value = datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
+                music_candidates(api, ["AbC", "Empty"], random.Random(3))
+                self.assertEqual(sum(path == "/playlists/AbC/items" for path, _ in api.calls), 4)
+                self.assertEqual(sum(path == "/playlists/Empty/items" for path, _ in api.calls), 2)
+
+    def test_source_playlist_errors_use_old_cache_or_partial_results_without_caching_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            class Fake(Spotify):
+                def __init__(self):
+                    self.store = Store(os.path.join(directory, "cache.sqlite"))
+                    self.mode = "error"
+                    self.calls = 0
+
+                def get(self, path, **params):
+                    if path.startswith("/playlists/"):
+                        self.calls += 1
+                        if self.mode == "partial" and params["offset"] == 0:
+                            return {"items": [{"item": {
+                                "id": "fresh", "type": "track", "uri": "spotify:track:fresh",
+                                "duration_ms": 180000,
+                            }}], "next": "next"}
+                        raise SpotifyError("playlist unavailable")
+                    return {"items": []}
+
+                def liked_tracks(self, rng):
+                    return []
+
+                def followed_artists(self, trace=None):
+                    return []
+
+            api = Fake()
+            old = [{"item": {"id": "old", "type": "track", "uri": "spotify:track:old", "duration_ms": 180000}}]
+            api.store.set_cached("source_playlist_AbC_cache", "2026-01-15", old)
+            with patch("app.spotify.datetime") as clock:
+                clock.now.return_value = datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
+                issues, trace = [], []
+                with self.assertLogs("app.selection", level="WARNING"):
+                    groups = music_candidates(api, ["AbC"], random.Random(1), issues, trace)
+                self.assertEqual([item["id"] for item in groups[3]], ["old"])
+                self.assertIn("Source playlist AbC: Spotify fetch failed; reused cache from 2026-01-15.", trace)
+                self.assertTrue(any("Using cached playlist AbC after an error: playlist unavailable" in issue
+                                    for issue in issues))
+                self.assertIsNone(api.store.get_cached("source_playlist_AbC_cache", "2026-01-16"))
+
+                api.mode = "partial"
+                issues, trace = [], []
+                with self.assertLogs("app.selection", level="WARNING"):
+                    groups = music_candidates(api, ["AbC"], random.Random(1), issues, trace)
+                self.assertEqual([item["id"] for item in groups[3]], ["fresh"])
+                self.assertIn("Source playlist AbC: partially retrieved from Spotify during this refresh; not cached.",
+                              trace)
+                self.assertTrue(any("Using partial playlist AbC after an error: playlist unavailable" in issue
+                                    for issue in issues))
+                self.assertIsNone(api.store.get_cached("source_playlist_AbC_cache", "2026-01-16"))
+                self.assertEqual(api.calls, 3)
+
+                api.mode = "error"
+                api.store.set_cached("source_playlist_Empty_cache", "2026-01-15", [])
+                issues, trace = [], []
+                with self.assertLogs("app.selection", level="WARNING"):
+                    music_candidates(api, ["Missing", "Empty"], random.Random(1), issues, trace)
+                self.assertIn(
+                    "Source playlist Missing: Spotify fetch failed; no data retrieved from cache; "
+                    "0 results because the fetch failed.", trace,
+                )
+                self.assertIn(
+                    "Source playlist Empty: Spotify fetch failed; reused cache from 2026-01-15; "
+                    "0 results because the fetch failed.", trace,
+                )
+                self.assertTrue(any("Skipping playlist Missing: playlist unavailable" in issue for issue in issues))
+                self.assertTrue(any("Using cached playlist Empty after an error: playlist unavailable" in issue
+                                    for issue in issues))
+
     def test_partial_liked_tracks_origin_is_saved_in_history(self):
         with tempfile.TemporaryDirectory() as directory:
             class Fake(Spotify):
