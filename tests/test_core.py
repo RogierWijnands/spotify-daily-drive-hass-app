@@ -1554,9 +1554,23 @@ class SpotifyTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.store = Store(os.path.join(directory.name, "requests.sqlite"))
 
-    def test_existing_artist_release_track_counts_keep_their_numbering(self):
+    def test_incomplete_discovery_cache_is_rejected(self):
+        api = Spotify.__new__(Spotify)
+        api.store = self.store
+        api.get = Mock(return_value={"items": []})
+        api.followed_artists = Mock(return_value=[])
+        api.liked_tracks = Mock(return_value=[])
+        day = datetime.now().astimezone().date().isoformat()
+        self.store.set_cached("discovery_tracks_cache", day, {
+            "discoveries": [], "collaborators": [], "issues": [], "selection": [],
+            "fallback_day": None,
+        })
+        with self.assertRaisesRegex(SpotifyError, "Invalid cached discovery tracks"):
+            music_candidates(api, [], random.Random(1))
+
+    def test_artist_release_track_requests_keep_their_numbering(self):
         started = datetime.now().astimezone()
-        self.store.start_request("Release tracks", started, "Read; release ID album123")
+        self.store.start_request("Release tracks", started, "Read; artist release ID album123")
         api = Spotify.__new__(Spotify)
         api.store = self.store
         api.token = "secret"
@@ -1573,14 +1587,6 @@ class SpotifyTests(unittest.TestCase):
         self.assertEqual(overview["first_quota"]["category"], "Artist release tracks")
         self.assertEqual(overview["first_quota"]["category_number"], 2)
         self.assertEqual(overview["first_quota"]["detail"], "Read; artist release ID album123")
-
-    def test_existing_artist_release_quota_details_use_clearer_labels(self):
-        started = datetime.now().astimezone()
-        info = self.store.start_request("Release tracks", started, "Read; release ID album123")
-        self.store.fail_request(info, quota=True)
-        first_quota = Store(self.store.path).request_overview(started.date().isoformat())["first_quota"]
-        self.assertEqual(first_quota["category"], "Artist release tracks")
-        self.assertEqual(first_quota["detail"], "Read; artist release ID album123")
 
     def test_daily_discovery_cache_limits_requests_and_keeps_partial_results(self):
         class FixedRandom(random.Random):
@@ -2309,11 +2315,6 @@ class SpotifyTests(unittest.TestCase):
                 clock.now.return_value = datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc)
                 with self.assertRaisesRegex(SpotifyError, "Retry-After: '172'"):
                     api.followed_artists()
-                state = api.store.get("followed_artists_cache")
-                self.assertNotIn("last_error", state)
-                state["last_error"] = "previous error; Retry-After: '172'"
-                api.store.set_many({"followed_artists_cache": state})
-
                 clock.now.return_value = datetime(2026, 1, 15, 10, 5, tzinfo=timezone.utc)
                 for _ in range(2):
                     trace = []
@@ -2331,7 +2332,6 @@ class SpotifyTests(unittest.TestCase):
                 clock.now.return_value = datetime(2026, 1, 16, 10, 0, tzinfo=timezone.utc)
                 self.assertEqual(len(api.followed_artists()), 5)
                 self.assertEqual(api.get.call_count, 6)
-                self.assertNotIn("last_error", api.store.get("followed_artists_cache"))
 
     def test_invalid_followed_artist_cursor_fails(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2524,17 +2524,35 @@ class RefreshTests(unittest.TestCase):
         self.assertEqual(self.store.history()[0]["status"], "succeeded")
         self.assertIsNone(self.store.history()[0]["api_requests"])
 
-    def test_existing_database_history_has_unknown_request_stats(self):
-        path = os.path.join(self.temp.name, "old.sqlite")
+    def test_incomplete_history_schema_is_rejected_without_modification(self):
+        path = os.path.join(self.temp.name, "incomplete.sqlite")
         with sqlite3.connect(path) as db:
             db.execute("CREATE TABLE history (id INTEGER PRIMARY KEY, started TEXT NOT NULL, "
                        "status TEXT NOT NULL, detail TEXT NOT NULL, scheduled_key TEXT UNIQUE)")
             db.execute("INSERT INTO history (started, status, detail) VALUES (?, ?, ?)",
-                       ("2026-01-01", "succeeded", "old"))
-        entry = Store(path).history()[0]
-        self.assertEqual(entry["detail"], "old")
-        self.assertEqual((entry["api_requests"], entry["token_requests"], entry["cache_hits"]),
-                         (None, None, None))
+                       ("2026-01-01", "succeeded", "saved"))
+        with self.assertRaisesRegex(sqlite3.OperationalError, "no such column"):
+            Store(path)
+        with sqlite3.connect(path) as db:
+            self.assertEqual(db.execute("SELECT detail FROM history").fetchone()[0], "saved")
+            self.assertNotIn("api_requests", {row[1] for row in db.execute("PRAGMA table_info(history)")})
+            self.assertEqual(
+                [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")],
+                ["history"],
+            )
+
+    def test_reopening_current_storage_preserves_history_and_settings(self):
+        self.store.set_many({"client_id": "client"})
+        history_id = self.store.start()
+        self.store.finish(history_id, "succeeded", "completed")
+        self.store.save_request_stats(history_id, RefreshRequestStats(3, 1, 2))
+        reopened = Store(self.store.path)
+        self.assertEqual(reopened.get("client_id"), "client")
+        self.assertEqual(reopened.history()[0]["detail"], "completed")
+        self.assertEqual(
+            tuple(reopened.history()[0][key] for key in ("api_requests", "token_requests", "cache_hits")),
+            (3, 1, 2),
+        )
 
     def test_reconciliation_preserves_old_refresh_counts(self):
         self.store.set_many({"client_id": "client", "refresh_token": "saved"})

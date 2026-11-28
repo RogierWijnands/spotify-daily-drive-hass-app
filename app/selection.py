@@ -460,6 +460,11 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None, outcomes=N
         or not all(isinstance(issue, str) for issue in discovery_cache["issues"])
         or not isinstance(discovery_cache.get("selection"), list)
         or not all(isinstance(line, str) for line in discovery_cache["selection"])
+        or "fallback_day" not in discovery_cache
+        or (discovery_cache["fallback_day"] is not None
+            and not isinstance(discovery_cache["fallback_day"], str))
+        or not isinstance(discovery_cache.get("fallback_uris"), list)
+        or not all(isinstance(uri, str) for uri in discovery_cache["fallback_uris"])
     ):
         raise SpotifyError("Invalid cached discovery tracks")
 
@@ -485,12 +490,8 @@ def music_candidates(api, playlist_ids, rng, issues=None, trace=None, outcomes=N
 
     discoveries = discovery_cache["discoveries"]
     collaborator_tracks = discovery_cache["collaborators"]
-    fallback_day = discovery_cache.get("fallback_day")
-    if fallback_day is not None and not isinstance(fallback_day, str):
-        raise SpotifyError("Invalid cached discovery fallback date")
-    fallback_uris = discovery_cache.get("fallback_uris", [])
-    if not isinstance(fallback_uris, list) or not all(isinstance(uri, str) for uri in fallback_uris):
-        raise SpotifyError("Invalid cached discovery fallback items")
+    fallback_day = discovery_cache["fallback_day"]
+    fallback_uris = discovery_cache["fallback_uris"]
     cached_uris.update(fallback_uris)
     if discovery_fetched:
         issues.extend(discovery_issues)

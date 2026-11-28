@@ -75,7 +75,6 @@ REQUEST_CATEGORY_LIKED_TRACKS = "Liked tracks"
 REQUEST_CATEGORY_FOLLOWED_ARTISTS = "Followed artists"
 REQUEST_CATEGORY_SHOW_EPISODES = "Show episodes"
 REQUEST_CATEGORY_ARTIST_RELEASES = "Artist releases"
-# Preserve the stored key so today's existing request counts remain intact.
 REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS_KEY = "Release tracks"
 REQUEST_CATEGORY_ARTIST_RELEASE_TRACKS = "Artist release tracks"
 REQUEST_CATEGORY_PLAYLIST_READS = "Playlist reads"
@@ -149,10 +148,6 @@ ARTIST_RELEASE_ERROR_PREFIXES = (
     SKIP_ARTIST_RELEASES_PREFIX,
     COMBINED_ARTIST_RELEASE_LOOKUP_PREFIX,
     SKIP_ARTIST_RELEASE_POSITION_PREFIX,
-    # Older history and cached warnings must keep their error links.
-    "Skipping releases for artist ",
-    "Combined release lookup for artist ",
-    "Skipping release at position ",
 )
 PLAYLIST_SOURCE_ERROR_PREFIXES = tuple(
     prefix + SOURCE_PLAYLISTS + " "
@@ -175,4 +170,3 @@ HISTORY_ERROR_MARKERS = (
 
 SELECTION_DETAIL_SEPARATOR = "\nSelection:\n"
 ITEMS_DETAIL_SEPARATOR = "\nItems:\n"
-TRACKS_DETAIL_SEPARATOR = "\nTracks:\n"

@@ -192,10 +192,10 @@ class WebTests(unittest.TestCase):
                 self.assertIn(b".control-panel", page.data)
                 self.assertNotIn(b'rel="stylesheet"', page.data)
 
-    def test_request_overview_uses_artist_release_name_for_existing_counts(self):
+    def test_request_overview_displays_artist_release_requests(self):
         store = self.isolated_store()
         started = datetime.now().astimezone()
-        info = store.start_request("Release tracks", started, "Read; release ID album123")
+        info = store.start_request("Release tracks", started, "Read; artist release ID album123")
         store.fail_request(info, quota=True)
         response = self.client.get("/", environ_overrides=self.remote)
         self.assertIn(b"<td>Artist release tracks</td><td>1</td><td>1</td>", response.data)
@@ -290,9 +290,9 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"Message: quota &lt;exceeded&gt;; Reason: QUOTA_EXCEEDED", response.data)
         self.assertIn(b"Retry-After: &#39;45&#39;", response.data)
 
-    def test_history_shows_available_request_stats_without_inventing_old_counts(self):
+    def test_history_shows_available_request_stats_without_inventing_missing_counts(self):
         store = self.isolated_store()
-        store.finish(store.start(), "failed", "old entry")
+        store.finish(store.start(), "failed", "failed entry")
         entry_id = store.start()
         store.finish(entry_id, "succeeded", "new entry\nSelection:\nLiked tracks: cached.")
         store.save_request_stats(entry_id, RefreshRequestStats(12, 1, 3))
@@ -303,7 +303,7 @@ class WebTests(unittest.TestCase):
         self.assertLess(html.index("Spotify API requests: 12;"),
                         html.index("<details><summary>How this playlist was selected</summary>"))
         self.assertEqual(html.count("Spotify API requests:"), 1)
-        self.assertIn("old entry", html)
+        self.assertIn("failed entry", html)
 
     def test_failed_history_displays_cache_origins(self):
         entry = {"started": "2026-01-01", "status": "failed",
@@ -321,7 +321,7 @@ class WebTests(unittest.TestCase):
                  "detail": "90 minutes\nSelection:\n"
                            "News show: 1 previously fetched episode reused from today's cache.\n"
                            "Liked tracks: Spotify fetch failed; reused cache from 2025-12-31.\n"
-                           "Source warning: Spotify failed (HTTP 429); Retry-After: '45'"}
+                           "Source error: Spotify failed (HTTP 429); Retry-After: '45'"}
         with patch.object(web.store, "history", return_value=[entry]):
             response = self.client.get("/", environ_overrides=self.remote)
         self.assertIn(b"News show: 1 previously fetched episode reused from today&#39;s cache.", response.data)
@@ -329,27 +329,30 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"HTTP 429", response.data)
         self.assertIn(b"Retry-After: &#39;45&#39;", response.data)
 
-    def test_successful_history_status_counts_source_errors_not_episode_shortfalls(self):
+    def test_successful_history_status_distinguishes_errors_and_episode_shortfalls(self):
         store = self.isolated_store()
         entries = [
             ("succeeded", "clean\nSelection:\nSource warning: Show news has 0 of 1 requested playable episodes"),
             ("succeeded", "single\nSelection:\n"
+             "Refresh outcome: error (news source error; no news selected; playlist contains music)\n"
              "Source error: Failed to fetch remaining episodes for show news: unavailable\n"
              "Source warning: Show news has 0 of 1 requested playable episodes"),
             ("succeeded", "multiple\nSelection:\n"
-             "Source warning: Skipping short-term top tracks: unavailable\n"
+             "Refresh outcome: error (music source error; playlist contains music)\n"
+             "Source error: Skipping short-term top tracks: unavailable\n"
              "Source error: Skipping artist releases for artist favorite: unavailable "
              "(during an earlier discovery fetch today)"),
-            ("failed", "failed detail\nSelection:\nSource warning: Skipping liked tracks: unavailable"),
-            ("uncertain", "uncertain detail\nSelection:\nSource warning: Skipping liked tracks: unavailable"),
+            ("failed", "failed detail\nSelection:\nSource error: Skipping liked tracks: unavailable"),
+            ("uncertain", "uncertain detail\nSelection:\nSource error: Skipping liked tracks: unavailable"),
         ]
         for status, detail in entries:
             store.finish(store.start(), status, detail)
 
         response = self.client.get("/", environ_overrides=self.remote)
         self.assertIn(b"<td>succeeded</td><td>clean", response.data)
-        self.assertIn(b"<td>error (1 source error; see details)</td><td>single", response.data)
-        self.assertIn(b"<td>error (2 source errors; see details)</td><td>multiple", response.data)
+        self.assertIn(b"<td>error (news source error; no news selected; playlist contains music)</td><td>single",
+                      response.data)
+        self.assertIn(b"<td>error (music source error; playlist contains music)</td><td>multiple", response.data)
         self.assertIn(b"<td>failed</td><td>failed detail", response.data)
         self.assertIn(b"<td>uncertain</td><td>uncertain detail", response.data)
         self.assertIn(b"Source warning: Show news has 0 of 1 requested playable episodes", response.data)
@@ -406,29 +409,6 @@ class WebTests(unittest.TestCase):
                       response.data)
         self.assertIn(b'during an earlier discovery fetch today', response.data)
 
-    def test_old_artist_release_warning_still_links_from_history(self):
-        old_warnings = (
-            "Skipping releases for artist favorite: Spotify failed",
-            "Combined release lookup for artist favorite failed",
-            "Skipping release at position 1 for artist favorite",
-        )
-        for warning in old_warnings:
-            with self.subTest(warning=warning):
-                entry = {
-                    "started": "2026-01-01",
-                    "status": "succeeded",
-                    "detail": (
-                        "90 minutes\nSelection:\n"
-                        "Selected music by candidate group: artist discoveries: 0 "
-                        "(no candidates because source retrieval failed).\n"
-                        f"Source warning: {warning}"
-                    ),
-                }
-                with patch.object(web.store, "history", return_value=[entry]):
-                    response = self.client.get("/", environ_overrides=self.remote)
-                self.assertIn(b'<a href="#history-0-error-1">no candidates because source retrieval failed</a>',
-                              response.data)
-
     def test_history_links_zero_result_errors_to_source_warnings(self):
         entry = {
             "started": "2026-01-01",
@@ -439,8 +419,8 @@ class WebTests(unittest.TestCase):
                 "0 results because the fetch failed.\n"
                 "News show bulletin: 0/1 requested episodes selected, using available playable episodes "
                 "and excluding duplicates. 0 episodes selected because Spotify requests failed.\n"
-                "Source warning: Skipping short-term top tracks: Spotify unavailable\n"
-                "Source warning: Failed to fetch remaining episodes for show bulletin: Spotify unavailable"
+                "Source error: Skipping short-term top tracks: Spotify unavailable\n"
+                "Source error: Failed to fetch remaining episodes for show bulletin: Spotify unavailable"
             ),
         }
         with patch.object(web.store, "history", return_value=[entry]):
@@ -456,12 +436,12 @@ class WebTests(unittest.TestCase):
         self.assertIn(b'id="history-0-error-2"', response.data)
         self.assertIn(b'id="history-0-error-3"', response.data)
 
-    def test_history_expands_tracks_and_keeps_old_details_readable(self):
+    def test_history_expands_playlist_items_and_details(self):
         store = self.isolated_store()
-        store.finish(store.start(), "failed", "Old error message")
+        store.finish(store.start(), "failed", "Refresh error message")
         history_id = store.start()
         store.prepare(history_id, "target", [], ["track1", "track2"], [],
-                      "90 minutes; 2 music tracks\nTracks:\nArtist - Song\nOther & Artist - <Song>")
+                      "90 minutes; 2 music tracks\nItems:\nArtist - Song\nOther & Artist - <Song>")
         store.resolve(True)
         history_id = store.start()
         store.prepare(history_id, "target", [], ["track1", "episode"], ["episode"],
@@ -478,7 +458,7 @@ class WebTests(unittest.TestCase):
         self.assertIn(b"<li>Artist - Song</li>", response.data)
         self.assertIn(b"<li>Other &amp; Artist - &lt;Song&gt;</li>", response.data)
         self.assertIn(b"<li>[Episode] News &amp; &lt;Update&gt;</li>", response.data)
-        self.assertIn(b"Old error message", response.data)
+        self.assertIn(b"Refresh error message", response.data)
         self.assertEqual(response.data.count(b"<details>"), 3)
 
     def test_configuration_accepts_urls_and_rejects_target_as_source(self):

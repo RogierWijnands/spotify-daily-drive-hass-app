@@ -15,9 +15,9 @@ Combine Spotify music, discoveries, artist releases, news and podcasts in one pl
 
 - **Schedule:** enabled by default at 08:15, 12:15, 16:15 and 20:15. Edit times or disable it in the web UI. Enter at least one 24-hour time per line. The app must be running; missed refreshes are not retried. Manual refresh remains available.
 - **Timezone and market:** default to the system timezone and `NL`. The timezone controls schedules, cache days and request counts. Spotify may prioritize the account's country.
-- **Shows:** enter one Spotify show URL or ID and episode count per line, such as `https://open.spotify.com/show/SHOW_ID, 4`. Each show may appear once; the combined count is at most 99. Leave both show fields empty for music only. Configure shows after upgrading from versions without show settings.
+- **Shows:** enter one Spotify show URL or ID and episode count per line, such as `https://open.spotify.com/show/SHOW_ID, 4`. Each show may appear once; the combined count is at most 99. Leave both show fields empty for music only.
 - **Source playlists:** use playlists you own or collaborate on. Copies of Discover Weekly or Release Radar can be used, but do not update automatically.
-- Changing market or timezone clears caches; changing timezone also clears daily request statistics. Changing Spotify client ID clears caches and disconnects Spotify. Resolve an uncertain playlist change before changing market. Before version 0.1.27, day boundaries used Amsterdam time.
+- Changing market or timezone clears caches; changing timezone also clears daily request statistics. Changing Spotify client ID clears caches and disconnects Spotify. Resolve an uncertain playlist change before changing market.
 - **Updates and storage:** use **Check for updates** in the app store. Tokens, settings, caches and history are private in `/data/daily_drive.sqlite3`; removing app data deletes them. Repository and local installations have separate data.
 
 ## Playlist and cache
@@ -32,7 +32,7 @@ Combine Spotify music, discoveries, artist releases, news and podcasts in one pl
 ## History, errors and safety
 
 - History shows the latest refresh; expand earlier refreshes and load more in batches of 10. A successful playlist update with source errors shows `error` and describes cache use and available content. `failed` means the refresh stopped; `uncertain` means the playlist outcome is unknown. A show with too few episodes is not itself a Spotify error.
-- Details show selection, source errors, playlist items and per-refresh Spotify API requests, token requests and cache hits. A cache hit is a reused source or track list, not necessarily one avoided request. Older entries may have no counts.
+- Details show selection, source errors, playlist items and per-refresh Spotify API requests, token requests and cache hits. A cache hit is a reused source or track list, not necessarily one avoided request. Counts are unavailable until recorded.
 - **Spotify requests today** counts started API and token requests, including failures, and records the first rate-limit/quota error. Counts persist until cleared and reset for display at local midnight. Reload to update; they are not Spotify's rolling quota.
 - The target playlist is read before replacement, not from cache. Insufficient content, authentication, access or storage errors can stop preparation without replacing it. The app does not automatically retry Spotify errors.
 - Do not edit the playlist during a refresh. After a lost response, the app checks the old and proposed contents. If the outcome remains uncertain, further changes are blocked: check Spotify before releasing the block.
